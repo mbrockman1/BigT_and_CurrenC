@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+@layer base {
+    body {
+        @apply bg-slate-950 text-slate-200 antialiased;
+    }
+}
+
+/* If you want to keep old stuff, put it AFTER Tailwind */
