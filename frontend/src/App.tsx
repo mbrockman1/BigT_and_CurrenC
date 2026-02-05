@@ -24,6 +24,32 @@ import {
   LabelList,
 } from "recharts";
 import WalkForward from "./WalkForward";
+import { HelpCircle } from "lucide-react"; // Add to your imports
+
+const InfoTooltip = ({
+  title,
+  content,
+}: {
+  title: string;
+  content: string;
+}) => (
+  <div className="group relative inline-block ml-1.5 align-middle">
+    <HelpCircle
+      size={14}
+      className="text-slate-500 hover:text-blue-400 cursor-help transition-colors"
+    />
+    <div className="absolute z-[100] hidden group-hover:block w-72 p-3 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl text-[11px] -left-36 bottom-6 pointer-events-none animate-in fade-in zoom-in duration-200">
+      <div className="font-black text-blue-400 mb-1.5 uppercase tracking-widest border-b border-slate-800 pb-1">
+        {title}
+      </div>
+      <div className="text-slate-300 leading-relaxed font-medium">
+        {content}
+      </div>
+      {/* Small Arrow */}
+      <div className="absolute h-2 w-2 bg-slate-900 border-r border-b border-slate-700 transform rotate-45 left-1/2 -translate-x-1/2 -bottom-1"></div>
+    </div>
+  </div>
+);
 
 // --- REUSED COMPONENT: ModernOccupancyMap ---
 const ModernOccupancyMap = ({ data }: { data: any[] }) => {
@@ -197,6 +223,10 @@ const PostureCard = ({
       <div>
         <h3 className="text-sm font-black text-white uppercase tracking-widest flex items-center gap-2">
           <ShieldAlert size={16} className="text-blue-500" /> Model Stance
+          <InfoTooltip
+            title="Strategy Posture"
+            content="Deterministic rules for a portfolio. USD View: Hold more/less dollars. FX Risk: Aggressive vs Defensive positioning. Hedging: Intensity of crash insurance required."
+          />
         </h3>
       </div>
       <div className="text-right">
@@ -407,6 +437,10 @@ export default function App() {
             <div className="lg:col-span-3 bg-slate-900 border border-slate-800 rounded-2xl p-6 h-fit shadow-xl">
               <div className="flex items-center gap-2 mb-8 text-white font-black text-sm uppercase tracking-widest">
                 <Sliders size={16} className="text-blue-500" /> Belief Injection
+                <InfoTooltip
+                  title="Belief Injection"
+                  content="Manually shift the model’s 'Brain'. Mix Slider: Wrecking Ball (Crisis) vs Reflation (Growth). Persistence: Chase trends. Penalty: Filter out noisy/volatile currencies."
+                />
               </div>
               <SliderControl
                 label="Regime Mix (Risk)"
@@ -451,7 +485,15 @@ export default function App() {
             <div className="lg:col-span-9 space-y-6">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <StatCard
-                  label="Regime"
+                  label={
+                    <>
+                      Regime{" "}
+                      <InfoTooltip
+                        title="Market Regime"
+                        content="The overall macro 'season'. Wrecking Ball (Panic/USD Strength), Reflation (Growth/USD Weakness), Tightening (Orderly USD Strength/Yield driven), or US-Stress (US-specific crisis)."
+                      />
+                    </>
+                  }
                   value={baseData.regime.label}
                   subtext={baseData.regime.desc}
                   icon={ShieldAlert}
@@ -477,7 +519,15 @@ export default function App() {
                   }
                 />
                 <StatCard
-                  label="FX Stress"
+                  label={
+                    <>
+                      FX Stress{" "}
+                      <InfoTooltip
+                        title="FX Stress Level"
+                        content="Market 'Fever' index. Below 40 is healthy. Above 60 suggests the global liquidity plumbing is starting to clog with fear and volatility."
+                      />
+                    </>
+                  }
                   value={`${baseData.regime.indices.stress_score.toFixed(0)}/100`}
                   subtext="Vol + Breadth"
                   icon={Activity}

@@ -42,22 +42,48 @@ class WalkForwardEngine:
             self._yields, self.currencies
         )
 
-    def _get_top_edges(self, T, k=3):
+    def _get_top_edges(
+        self, T: np.ndarray, leakage_nodes: List[Any], k: int = 2
+    ) -> List[dict]:
+        """
+        Extracts the most significant capital flows.
+        Excludes self-loops to force 'rewiring' visibility.
+        Includes USD leakage as explicit edges.
+        """
         edges = []
-        T_viz = T.copy()
-        np.fill_diagonal(T_viz, 0)
-        for i in range(len(self.currencies)):
-            top_indices = np.argsort(T_viz[i])[-k:]
+        n = len(self.currencies)
+
+        # 1. PEER-TO-PEER FLOWS (Blue Lines)
+        for i in range(n):
+            row = T[i].copy()
+            # FORCE REWIRING: Set self-probability to zero so we see where capital EXITS to
+            row[i] = 0
+
+            # Get Top K destinations for this currency
+            top_indices = np.argsort(row)[-k:]
             for j in top_indices:
-                # LOWERED THRESHOLD: 0.05 -> 0.01 to ensure lines appear even in weak flows
-                if T_viz[i, j] > 0.01:
+                weight = float(row[j])
+                if weight > 0.001:  # High sensitivity threshold
                     edges.append(
                         {
                             "source": self.currencies[i],
                             "target": self.currencies[j],
-                            "weight": float(T_viz[i, j]),
+                            "weight": weight,
                         }
                     )
+
+        # 2. FLIGHT TO USD (Red Lines)
+        # We turn the leakage stats into explicit graph edges pointing to 'USD'
+        for node in leakage_nodes:
+            if node.leakage_prob > 0.01:
+                edges.append(
+                    {
+                        "source": node.iso,
+                        "target": "USD",  # The central reservoir
+                        "weight": float(node.leakage_prob),
+                    }
+                )
+
         return edges
 
     def run_walk_forward(self, weeks=52):
@@ -215,7 +241,7 @@ class WalkForwardEngine:
                 ]
 
                 if h_name == "medium":
-                    snapshot["edges"][h_name] = self._get_top_edges(T_adj)
+                    snapshot["edges"][h_name] = self._get_top_edges(T_adj, leakage)
 
                 # Validation
                 try:

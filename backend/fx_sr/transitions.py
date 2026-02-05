@@ -169,46 +169,45 @@ class TransitionModel:
         n = len(currencies)
         weights = np.zeros((n, n), dtype=float)
 
-        # 1. Macro Sensitivity Constants
-        # We lower these so they don't "explode" the exponential
-        w_yield = 1.5
-        w_mom = 0.8 * beliefs.trend_sensitivity
-        w_vol = 1.0 * beliefs.vol_penalty
+        # --- SENSITIVITY TUNING ---
+        # Temperature controls how "concentrated" the flows are.
+        # Higher (1.0+) = Spiderweb (lots of rewiring). Lower (0.2) = Winner-Take-All.
+        temperature = 0.8
 
-        # TEMPERATURE: Higher = More connections / "rewiring" visible
-        # Lower = Graph collapses to only the #1 leader
-        temperature = 0.5
+        # We Z-Score the inputs so a 1% yield move has the same "Gravity" as a 1% price move.
+        def z_score(s):
+            return (s - s.mean()) / (s.std() + 1e-6)
 
-        y_vec = yield_diffs.reindex(currencies).fillna(0).to_numpy(dtype=float)
-        m_vec = mom.reindex(currencies).fillna(0).to_numpy(dtype=float)
-        v_vec = vol.reindex(currencies).fillna(0).to_numpy(dtype=float)
+        y_z = z_score(yield_diffs.reindex(currencies).fillna(0)).to_numpy()
+        m_z = (
+            z_score(mom.reindex(currencies).fillna(0)).to_numpy()
+            * beliefs.trend_sensitivity
+        )
+        v_z = (
+            z_score(vol.reindex(currencies).fillna(0)).to_numpy() * beliefs.vol_penalty
+        )
 
         for i in range(n):
             for j in range(n):
                 if i == j:
                     continue
 
-                # Calculate the raw "Attraction" from i to j
-                # We normalize the components so one doesn't dominate
-                yield_grad = y_vec[j] - y_vec[i]
-                mom_grad = m_vec[j] - m_vec[i]
-                vol_grad = v_vec[j] - v_vec[i]
+                # DIFFERENTIAL PHYSICS: Attraction is based on the RELATIVE advantage of j over i
+                # Capital flows from Low Yield -> High Yield
+                # Capital flows from Low Momentum -> High Momentum
+                # Capital flows from High Vol -> Low Vol
 
-                # The Physics Equation
-                score = (yield_grad * w_yield) + (mom_grad * w_mom) - (vol_grad * w_vol)
+                score = (y_z[j] - y_z[i]) + (m_z[j] - m_z[i]) - (v_z[j] - v_z[i])
 
-                # Apply Temperature Scaling before the exponential
-                # This is the "Softmax" trick used in AI to prevent saturation
                 weights[i, j] = np.exp(score / temperature)
 
-        # 2. Stability: Ensure we don't have 0.0 probabilities
-        # This allows the "Top-K" logic to actually see second/third place choices
+        # Ensure small baseline connectivity
         weights = np.clip(weights, 1e-6, None)
 
-        # Add a small self-loop (retention)
-        np.fill_diagonal(weights, weights.mean() * 0.5)
+        # Self-retention (diagonal)
+        np.fill_diagonal(weights, 1.0)
 
-        # 3. Normalize to Row-Stochastic
+        # Normalize rows to 1.0
         row_sums = weights.sum(axis=1, keepdims=True)
         T = weights / (row_sums + 1e-12)
 

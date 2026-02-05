@@ -10,6 +10,10 @@ import {
   ResponsiveContainer,
   Cell,
   LabelList,
+  ScatterChart,
+  Scatter,
+  ReferenceLine,
+  Label,
 } from "recharts";
 import {
   Play,
@@ -20,6 +24,7 @@ import {
   Zap,
   RefreshCw,
   AlertTriangle,
+  HelpCircle,
 } from "lucide-react";
 
 // --- Types ---
@@ -90,6 +95,31 @@ interface WalkForwardData {
   history: Snapshot[];
   correlations: Record<string, number>;
 }
+
+const InfoTooltip = ({
+  title,
+  content,
+}: {
+  title: string;
+  content: string;
+}) => (
+  <div className="group relative inline-block ml-1.5 align-middle">
+    <HelpCircle
+      size={14}
+      className="text-slate-500 hover:text-blue-400 cursor-help transition-colors"
+    />
+    {/* Use fixed z-index and ensure it's not clipped by overflow */}
+    <div className="absolute z-[9999] hidden group-hover:block w-64 p-3 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl text-[10px] -left-32 bottom-6 pointer-events-none animate-in fade-in zoom-in duration-200">
+      <div className="font-black text-blue-400 mb-1 uppercase tracking-widest border-b border-slate-800 pb-1">
+        {title}
+      </div>
+      <div className="text-slate-300 leading-relaxed font-medium">
+        {content}
+      </div>
+      <div className="absolute h-2 w-2 bg-slate-900 border-r border-b border-slate-700 transform rotate-45 left-1/2 -translate-x-1/2 -bottom-1"></div>
+    </div>
+  </div>
+);
 
 // --- 1. MODERN TOPOLOGY GRAPH (Custom SVG) ---
 const ModernCapitalTopology = ({
@@ -199,9 +229,15 @@ const ModernCapitalTopology = ({
         {/* Links: Peer Flows (Blue) */}
         {edges?.map((e: any, i: number) => {
           const start = nodes.find((n) => n.iso === e.source);
-          const end = nodes.find((n) => n.iso === e.target);
+          // FIX: If target is USD, use the 'center' coordinates, otherwise find the node
+          const end =
+            e.target === "USD"
+              ? { x: center, y: center }
+              : nodes.find((n) => n.iso === e.target);
+
           if (!start || !end) return null;
 
+          const isUSD = e.target === "USD";
           const isFocused =
             hoverNode && (e.source === hoverNode || e.target === hoverNode);
           const isDimmed = hoverNode && !isFocused;
@@ -219,20 +255,11 @@ const ModernCapitalTopology = ({
                 y1={start.y}
                 x2={end.x}
                 y2={end.y}
-                stroke="#1e3a8a"
-                strokeWidth={e.weight * 3}
-                opacity={0.3}
-              />
-              <line
-                x1={start.x}
-                y1={start.y}
-                x2={end.x}
-                y2={end.y}
-                stroke="url(#grad-flow)"
-                strokeWidth={Math.max(1.5, e.weight * 5)}
-                strokeDasharray="8 8"
-                className="flow-line"
-                filter="url(#glow-blue)"
+                stroke={isUSD ? "#ef4444" : "#3b82f6"}
+                strokeWidth={Math.max(1, e.weight * 5)}
+                strokeDasharray={isUSD ? "4 2" : "0"}
+                className={isUSD ? "leak-line" : "flow-line"}
+                opacity={isUSD ? 0.4 : 0.6}
               />
             </g>
           );
@@ -326,7 +353,7 @@ export const ModernOccupancyMap = ({ data }: { data: any[] }) => {
       <BarChart
         data={data}
         layout="vertical"
-        margin={{ left: 0, right: 15, top: 10, bottom: 5 }}
+        margin={{ left: 10, right: 15, top: 10, bottom: 5 }}
       >
         <defs>
           <linearGradient id="barBlue" x1="0" y1="0" x2="1" y2="0">
@@ -349,7 +376,7 @@ export const ModernOccupancyMap = ({ data }: { data: any[] }) => {
         <YAxis
           dataKey="iso"
           type="category"
-          width={40}
+          width={55} // <- more space
           tick={{ fill: "#94a3b8", fontSize: 11, fontWeight: 700 }}
           axisLine={false}
           tickLine={false}
@@ -580,14 +607,17 @@ export default function WalkForward() {
       </div>
 
       {/* 3. Visualizations */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Network */}
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-2 relative h-[350px] shadow-2xl overflow-hidden group">
-          <div className="absolute top-3 left-4 z-10">
-            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
-              <GitCommit size={14} className="text-blue-500" /> Structural Flows
-            </h3>
-          </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* NETWORK (Topology) */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 h-[280px] relative shadow-xl">
+          <h3 className="text-[9px] font-black text-slate-500 uppercase tracking-widest absolute top-3 left-4 flex items-center gap-2 z-10">
+            <GitCommit size={14} className="text-blue-500" /> Capital Flow
+            Topology
+            <InfoTooltip
+              title="Plumbing Map"
+              content="Blue: Peer rotation. Red: Safety leakage to USD. Blips: Strength of gravity."
+            />
+          </h3>
           <ModernCapitalTopology
             edges={snap.edges["medium"]}
             leakage={snap.usd_leakage}
@@ -597,12 +627,81 @@ export default function WalkForward() {
 
         {/* Prediction Bar Chart */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 h-[350px] flex flex-col shadow-2xl">
-          <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+          <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-2">
             <TrendingUp size={14} className="text-emerald-500" /> Future
             Occupancy Map
+            <InfoTooltip
+              title="Structural Sinks"
+              content="Where will capital 'settle' after 3 months? High bars are 'Sinks'—stable places where capital stays. Blue bars highlight the top structural winners."
+            />
           </h3>
           <div className="flex-grow">
             <ModernOccupancyMap data={scores} />
+          </div>
+        </div>
+
+        {/* SCATTER (Validation) */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 h-[280px] flex flex-col shadow-xl">
+          <h3 className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-2">
+            <Activity size={14} className="text-purple-500" /> Prediction vs
+            Outcome
+            <InfoTooltip
+              title="Report Card"
+              content="A diagnostic plot correlating model conviction against market reality. The X-axis represents predicted structural strength, while the Y-axis shows the actual realized return. A positive diagonal distribution proves the model’s 'Capital Sinks' are successfully capturing market alpha."
+            />
+          </h3>
+          <div className="flex-grow">
+            <ResponsiveContainer width="100%" height="100%">
+              <ScatterChart
+                margin={{ top: 10, right: 10, bottom: 20, left: -20 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+
+                <XAxis
+                  type="number"
+                  dataKey="score"
+                  stroke="#ffffff"
+                  tick={{ fill: "#ffffff" }}
+                  fontSize={9}
+                >
+                  <Label
+                    value="Pred Score"
+                    offset={-10}
+                    position="insideBottom"
+                    fill="#ffffff"
+                    fontSize={8}
+                  />
+                </XAxis>
+
+                <YAxis
+                  type="number"
+                  dataKey="ret"
+                  unit="%"
+                  stroke="#ffffff"
+                  tick={{ fill: "#ffffff" }}
+                  fontSize={9}
+                />
+
+                <Tooltip
+                  cursor={{ strokeDasharray: "3 3" }}
+                  contentStyle={{
+                    backgroundColor: "#0f172a",
+                    border: "1px solid #334155",
+                    fontSize: "10px",
+                  }}
+                  labelStyle={{ color: "#fff" }}
+                  itemStyle={{ color: "#fff" }}
+                />
+
+                <ReferenceLine y={0} stroke="#334155" />
+
+                <Scatter name="FX" data={scatterData}>
+                  {scatterData.map((e: any, i: number) => (
+                    <Cell key={i} fill={e.ret > 0 ? "#10b981" : "#ef4444"} />
+                  ))}
+                </Scatter>
+              </ScatterChart>
+            </ResponsiveContainer>
           </div>
         </div>
       </div>
