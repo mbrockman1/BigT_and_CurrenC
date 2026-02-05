@@ -15,66 +15,6 @@ class TransitionModel:
     def __init__(self, config: FXConfig):
         self.config = config
 
-    def construct_scenario_matrix(
-        self,
-        snapshot_mom: pd.Series,
-        snapshot_vol: pd.Series,
-        base_vix: float,
-        beliefs: BeliefParams,
-    ) -> np.ndarray:
-        """
-        Builds T based on user beliefs blended with market data.
-        """
-        currencies = list(self.config.UNIVERSE.keys())
-        n = len(currencies)
-        weights = np.zeros((n, n), dtype=float)
-
-        effective_vix = (
-            beliefs.vix_override if beliefs.vix_override is not None else base_vix
-        )
-
-        mix = beliefs.risk_mix
-        base_trend_weight = (1 - mix) * 5.0 + (mix) * 1.0
-        base_vol_weight = (1 - mix) * 1.0 + (mix) * 4.0
-        base_haven_bonus = (mix) * 1.5
-
-        w_mom = base_trend_weight * beliefs.trend_sensitivity
-        w_vol = base_vol_weight * beliefs.vol_penalty
-
-        mom_vec = snapshot_mom.reindex(currencies).to_numpy(dtype=float)
-        vol_vec = snapshot_vol.reindex(currencies).to_numpy(dtype=float)
-
-        if beliefs.shocks:
-            for shock in beliefs.shocks:
-                if shock.iso in currencies:
-                    idx = currencies.index(shock.iso)
-                    vol_vec[idx] *= shock.vol_shock
-                    mom_vec[idx] *= shock.mom_shock
-
-        for i in range(n):
-            for j in range(n):
-                if i == j:
-                    continue
-
-                curr_target = currencies[j]
-
-                mom_diff = mom_vec[j] - mom_vec[i]
-                vol_diff = vol_vec[i] - vol_vec[j]
-
-                haven_score = 0.0
-                if curr_target in self.config.SAFE_HAVENS:
-                    haven_score = base_haven_bonus
-
-                score = (mom_diff * w_mom) + (vol_diff * w_vol) + haven_score
-                score = float(np.clip(score, -15.0, 15.0))
-                weights[i, j] = np.exp(score)
-
-        np.fill_diagonal(weights, 0.1)
-        row_sums = weights.sum(axis=1, keepdims=True)
-        T = weights / (row_sums + 1e-12)
-
-        return T
-
     def apply_regime_physics(
         self,
         T: np.ndarray,
@@ -217,3 +157,128 @@ class TransitionModel:
             net_flow -= release * n
 
         return T_adj, leakage_nodes, net_flow
+
+    def construct_physics_matrix(
+        self,
+        mom: pd.Series,
+        vol: pd.Series,
+        yield_diffs: pd.Series,
+        beliefs: BeliefParams,
+    ) -> np.ndarray:
+        currencies = list(self.config.UNIVERSE.keys())
+        n = len(currencies)
+        weights = np.zeros((n, n), dtype=float)
+
+        # 1. Macro Sensitivity Constants
+        # We lower these so they don't "explode" the exponential
+        w_yield = 1.5
+        w_mom = 0.8 * beliefs.trend_sensitivity
+        w_vol = 1.0 * beliefs.vol_penalty
+
+        # TEMPERATURE: Higher = More connections / "rewiring" visible
+        # Lower = Graph collapses to only the #1 leader
+        temperature = 0.5
+
+        y_vec = yield_diffs.reindex(currencies).fillna(0).to_numpy(dtype=float)
+        m_vec = mom.reindex(currencies).fillna(0).to_numpy(dtype=float)
+        v_vec = vol.reindex(currencies).fillna(0).to_numpy(dtype=float)
+
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+
+                # Calculate the raw "Attraction" from i to j
+                # We normalize the components so one doesn't dominate
+                yield_grad = y_vec[j] - y_vec[i]
+                mom_grad = m_vec[j] - m_vec[i]
+                vol_grad = v_vec[j] - v_vec[i]
+
+                # The Physics Equation
+                score = (yield_grad * w_yield) + (mom_grad * w_mom) - (vol_grad * w_vol)
+
+                # Apply Temperature Scaling before the exponential
+                # This is the "Softmax" trick used in AI to prevent saturation
+                weights[i, j] = np.exp(score / temperature)
+
+        # 2. Stability: Ensure we don't have 0.0 probabilities
+        # This allows the "Top-K" logic to actually see second/third place choices
+        weights = np.clip(weights, 1e-6, None)
+
+        # Add a small self-loop (retention)
+        np.fill_diagonal(weights, weights.mean() * 0.5)
+
+        # 3. Normalize to Row-Stochastic
+        row_sums = weights.sum(axis=1, keepdims=True)
+        T = weights / (row_sums + 1e-12)
+
+        return T
+
+    def apply_adaptive_leakage(
+        self,
+        T: np.ndarray,
+        currencies: List[str],
+        vix_z_score: float,  # <--- NEW: Dynamic Input
+        indices: pd.Series,
+    ) -> Tuple[np.ndarray, List[USDLeakageNode], float, RegimeData]:
+        """
+        Applies USD Leakage based on Adaptive Z-Scores, not magic numbers.
+        """
+        # 1. Calculate Dynamic Leakage Intensity using Sigmoid
+        # Z-Score of 0 (Mean VIX) -> 10% Leakage
+        # Z-Score of +2 (Crisis) -> 40% Leakage
+        # Z-Score of -1 (Calm) -> 0% Leakage
+        sigmoid = 1 / (1 + np.exp(-(vix_z_score - 0.5)))
+        leakage_intensity = float(sigmoid * 0.40)  # Max 40%
+
+        # Direction filter: Only leak if USD is structurally strong
+        if indices["direction_score"] < 0:
+            leakage_intensity = 0.0  # No leakage if USD is crashing
+
+        # 2. Apply Physics
+        n = len(currencies)
+        leakage_nodes = []
+        net_flow = 0.0
+        T_adj = T.copy()
+
+        if leakage_intensity > 0.01:
+            for i in range(n):
+                p_leak = leakage_intensity
+                T_adj[i, :] = T_adj[i, :] * (1.0 - p_leak)
+                leakage_nodes.append(
+                    USDLeakageNode(
+                        iso=currencies[i], leakage_prob=p_leak, is_source=False
+                    )
+                )
+                net_flow += p_leak
+
+        # 3. Construct Regime Label (Data-Driven)
+        label = "Neutral"
+        desc = "Markets are near historical averages."
+
+        if vix_z_score > 1.0:
+            label = "High Stress"
+            desc = "VIX is > 1 std dev above mean. Capital constraints active."
+            if indices["direction_score"] > 0:
+                label = "USD Wrecking Ball"
+                desc = (
+                    f"Crisis Logic: High Stress (Z={vix_z_score:.1f}) + USD Strength."
+                )
+        elif vix_z_score < -0.5:
+            label = "Reflation / Carry"
+            desc = "Low Volatility Regime. Yield seeking behavior dominant."
+
+        regime_data = RegimeData(
+            label=label,
+            desc=desc,
+            indices=MacroIndices(
+                stress_score=float((vix_z_score + 2) * 20),  # Proxy for UI 0-100
+                direction_score=float(indices["direction_score"]),
+                stress_breadth=0.5,
+                stress_vol=0.5,
+                usd_momentum=0.0,
+                yield_delta=0.0,
+            ),
+        )
+
+        return T_adj, leakage_nodes, net_flow, regime_data

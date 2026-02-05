@@ -63,9 +63,14 @@ class FXConfig:
     # NEW: Yield Proxies (2Y or similar short-end rates)
     # Note: Free data for INT 2Y is hard to find. We use these or fallback.
     YIELD_TICKERS = {
-        "USD": "^IRX",  # 13 Week Bill (Good proxy for Fed Funds/Policy)
-        "EUR": "^DE2Y",  # German 2Y (often requires explicit access)
-        # Fallbacks handled in data loader if these fail
+        "USD": "^TNX",  # US 10Y
+        "EUR": "0P0000JW1Q.F",  # German Bund 10Y (Frankfurt)
+        "GBP": "0P00007P6E.L",  # UK Gilt 10Y (London)
+        "JPY": "0P0000XW95.T",  # Japan 10Y (Tokyo)
+        "AUD": "0P0000XW6S.S",  # Australia 10Y (Sydney)
+        "CAD": "0P0000XW77.TO",  # Canada 10Y (Toronto)
+        "CHF": "0P0000XW9B.SW",  # Swiss 10Y (Zurich)
+        "NZD": "0P0000XW84.NZ",  # New Zealand 10Y (Auckland)
     }
 
     HORIZONS = {
@@ -74,4 +79,4 @@ class FXConfig:
         "long": 252,
     }
 
-    SAFE_HAVENS = {"JPY", "CHF"}
+    SAFE_HAVENS = {"JPY", "CHF", "USD"}

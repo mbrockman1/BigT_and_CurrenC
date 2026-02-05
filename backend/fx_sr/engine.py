@@ -30,23 +30,26 @@ class FXMacroEngine:
         self.physics = TransitionModel(self.config)
         self.math = SREngine(self.config)
         self.currencies = list(self.config.UNIVERSE.keys())
-
-        # Internal state to hold pre-processed data
-        self._global_df = None
-        self._feat_dict = None
-        self._macro_indices = None
-
-        # Initial data load
         self.refresh_data()
 
     def refresh_data(self):
-        self._global_df = self.loader.fetch_history()
+        """Pre-computes all inputs for the physics engine."""
+        self._global_df = self.loader.fetch_history(lookback_days=750)
         self._feat_dict, _ = self.features.compute_features(
             self._global_df, self.currencies
         )
         self._macro_indices = self.features.compute_macro_regime_indices(
             self._global_df, self.currencies
         )
+
+        # New Physics Inputs
+        self._yields = self.loader.fetch_yields(self._global_df.index)
+        self._yield_diffs = self.features.compute_yield_differentials(
+            self._yields, self.currencies
+        )
+        self._vix_z = self.features.compute_adaptive_tuning(self._global_df["VIX"])
+
+        print(f"Engine Ready. Records: {len(self._global_df)}")
 
     def _compute_horizon_results(
         self, T_adj: np.ndarray
@@ -55,160 +58,6 @@ class FXMacroEngine:
         for h_name, days in self.config.HORIZONS.items():
             gamma = self.math.get_gamma(days)
             M = self.math.compute_sr_matrix(T_adj, gamma)
-            scores = self.math.compute_strength_scores(M)
-            ranks = np.argsort(scores)[::-1]
-            h_list = []
-            for i, iso in enumerate(self.currencies):
-                h_list.append(
-                    HorizonResult(
-                        iso=iso,
-                        score=round(float(scores[i]), 4),
-                        rank=int(np.where(ranks == i)[0][0] + 1),
-                        delta=0.0,
-                        trend="Gaining",
-                    )
-                )
-            h_list.sort(key=lambda x: x.rank)
-            results[h_name] = h_list
-        return results
-
-    def run_eod_cycle(self) -> Dict[str, Any]:
-        if self._macro_indices is None:
-            self.refresh_data()
-
-        # 1. Latest Data
-        idx_rec = self._macro_indices.iloc[-1]
-        prev_idx = (
-            self._macro_indices.iloc[-2] if len(self._macro_indices) > 1 else idx_rec
-        )
-
-        mom = self._feat_dict["mom_21d"].iloc[-1]
-        vol = self._feat_dict["volatility"].iloc[-1]
-        vix = float(self._global_df["VIX"].iloc[-1])
-
-        # 2. Physics
-        T_base = self.physics.construct_scenario_matrix(mom, vol, vix, BeliefParams())
-        T_adj, _, _, regime = self.physics.apply_regime_physics(
-            T_base, self.currencies, idx_rec
-        )
-
-        # 3. History check for persistence (Simplified for EOD: look back 3 weeks)
-        # In a real DB, you'd query the persistent state. Here we approximate.
-        # We classify the previous week to see if it changed.
-        _, _, _, prev_regime = self.physics.apply_regime_physics(
-            T_base, self.currencies, prev_idx
-        )
-
-        persistence = 1  # Default
-        if prev_regime.label == regime.label:
-            persistence = 2  # Placeholder logic
-
-        # 4. Interpretability Layer
-        posture = self._compute_posture(regime)
-        conf = self._compute_confidence(regime, prev_regime.label, persistence)
-        delta = WeeklyDelta(
-            stress_chg=float(idx_rec.stress_score - prev_idx.stress_score),
-            direction_chg=float(idx_rec.direction_score - prev_idx.direction_score),
-            regime_shift=(regime.label != prev_regime.label),
-            prev_label=prev_regime.label,
-        )
-
-        horizons = self._compute_horizon_results(T_adj)
-
-        return {
-            "date": self._global_df.index[-1].strftime("%Y-%m-%d"),
-            "regime": regime.model_dump(),
-            "posture": posture.model_dump(),
-            "confidence": conf.model_dump(),
-            "delta": delta.model_dump(),
-            "horizons": {
-                k: [item.model_dump() for item in v] for k, v in horizons.items()
-            },
-        }
-
-        def run_eod_cycle(self) -> Dict[str, Any]:
-            # 1. Fetch latest
-            idx_rec = self._macro_indices.iloc[-1]
-            prev_idx = (
-                self._macro_indices.iloc[-2]
-                if len(self._macro_indices) > 1
-                else idx_rec
-            )
-
-            mom = self._feat_dict["mom_21d"].iloc[-1]
-            vol = self._feat_dict["volatility"].iloc[-1]
-            vix = float(self._global_df["VIX"].iloc[-1])
-
-            # 2. Physics
-            T_base = self.physics.construct_scenario_matrix(
-                mom, vol, vix, BeliefParams()
-            )
-            T_adj, _, _, regime = self.physics.apply_regime_physics(
-                T_base, self.currencies, idx_rec
-            )
-
-            # 3. Interpretations
-            posture = self._compute_posture(regime)
-            conf = RegimeConfidence(
-                score=max(0, 100 - (regime.indices.stress_score * 0.5)),
-                persistence=1,
-                is_stable=True,
-            )
-            delta = WeeklyDelta(
-                stress_chg=float(idx_rec.stress_score - prev_idx.stress_score),
-                direction_chg=float(idx_rec.direction_score - prev_idx.direction_score),
-                regime_shift=(regime.label != "Unknown"),  # Simplified
-                prev_label=None,
-            )
-
-            # 4. Horizons
-            horizons = {}
-            for h_name, days in self.config.HORIZONS.items():
-                M = self.math.compute_sr_matrix(T_adj, self.math.get_gamma(days))
-                scores = self.math.compute_strength_scores(M)
-                ranks = np.argsort(scores)[::-1]
-                horizons[h_name] = [
-                    HorizonResult(
-                        iso=self.currencies[i],
-                        score=round(float(scores[i]), 4),
-                        rank=int(np.where(ranks == i)[0][0] + 1),
-                        delta=0,
-                        trend="Gaining",
-                    )
-                    for i in range(len(self.currencies))
-                ]
-
-            # 5. Final Package (Matches EngineOutput schema)
-            return {
-                "date": self._global_df.index[-1].strftime("%Y-%m-%d"),
-                "regime": regime.model_dump(),
-                "posture": posture.model_dump(),
-                "confidence": conf.model_dump(),
-                "delta": delta.model_dump(),
-                "horizons": {
-                    k: [item.model_dump() for item in v] for k, v in horizons.items()
-                },
-            }
-
-    def run_simulation(self, beliefs: BeliefParams) -> SimulationOutput:
-        # Simplified for validation stability
-        current_mom = self._feat_dict["mom_21d"].iloc[-1]
-        current_vol = self._feat_dict["volatility"].iloc[-1]
-        vix = (
-            beliefs.vix_override
-            if beliefs.vix_override
-            else float(self._global_df["VIX"].iloc[-1])
-        )
-        T = self.physics.construct_scenario_matrix(
-            current_mom, current_vol, vix, beliefs
-        )
-        T_adj, _, _, _ = self.physics.apply_regime_physics(
-            T, self.currencies, self._macro_indices.iloc[-1]
-        )
-
-        results = {}
-        for h_name, days in self.config.HORIZONS.items():
-            M = self.math.compute_sr_matrix(T_adj, self.math.get_gamma(days))
             scores = self.math.compute_strength_scores(M)
             ranks = np.argsort(scores)[::-1]
             results[h_name] = [
@@ -221,22 +70,127 @@ class FXMacroEngine:
                 )
                 for i in range(len(self.currencies))
             ]
+        return results
+
+    def run_eod_cycle(self) -> Dict[str, Any]:
+        """Calculates /latest dashboard."""
+        idx_rec = self._macro_indices.iloc[-1]
+        prev_idx = (
+            self._macro_indices.iloc[-2] if len(self._macro_indices) > 1 else idx_rec
+        )
+
+        # Physics Inputs
+        mom = self._feat_dict["mom_21d"].iloc[-1]
+        vol = self._feat_dict["volatility"].iloc[-1]
+        y_diff = self._yield_diffs.iloc[-1]
+        vix_z = self._vix_z.iloc[-1]
+
+        T_base = self.physics.construct_physics_matrix(mom, vol, y_diff, BeliefParams())
+        T_adj, leakage, net_flow, regime = self.physics.apply_adaptive_leakage(
+            T_base, self.currencies, vix_z, idx_rec
+        )
+
+        horizons = self._compute_horizon_results(T_adj)
+        posture = self._compute_posture(regime)
+
+        return {
+            "date": self._global_df.index[-1].strftime("%Y-%m-%d"),
+            "regime": regime.model_dump(),
+            "posture": posture.model_dump(),
+            "confidence": {
+                "score": float(max(0, 100 - (abs(vix_z) * 20))),
+                "persistence": 1,
+                "is_stable": True,
+            },
+            "delta": {
+                "stress_chg": float(idx_rec.stress_score - prev_idx.stress_score),
+                "direction_chg": float(
+                    idx_rec.direction_score - prev_idx.direction_score
+                ),
+                "regime_shift": (regime.label != "Unknown"),
+                "prev_label": None,
+            },
+            "horizons": {
+                k: [item.model_dump() for item in v] for k, v in horizons.items()
+            },
+        }
+
+    def run_simulation(self, beliefs: BeliefParams) -> SimulationOutput:
+        """Calculates POST /simulate."""
+        mom = self._feat_dict["mom_21d"].iloc[-1]
+        vol = self._feat_dict["volatility"].iloc[-1]
+        y_diff = self._yield_diffs.iloc[-1]
+
+        # Recalculate VIX Z for simulation override
+        vix_actual = float(self._global_df["VIX"].iloc[-1])
+        vix_to_use = (
+            beliefs.vix_override if beliefs.vix_override is not None else vix_actual
+        )
+
+        # Approx Z-score update
+        mean_vix = self._global_df["VIX"].rolling(126).mean().iloc[-1]
+        std_vix = self._global_df["VIX"].rolling(126).std().iloc[-1]
+        vix_z = (vix_to_use - mean_vix) / (std_vix + 1e-6)
+
+        T_base = self.physics.construct_physics_matrix(mom, vol, y_diff, beliefs)
+
+        # Adjust stress score for regime label
+        idx_rec = self._macro_indices.iloc[-1].copy()
+        if beliefs.vix_override:
+            idx_rec["stress_score"] = min(100.0, beliefs.vix_override * 2.5)
+
+        T_adj, _, _, _ = self.physics.apply_adaptive_leakage(
+            T_base, self.currencies, vix_z, idx_rec
+        )
+
         return SimulationOutput(
-            mode="counterfactual", params_used=beliefs, horizons=results, posture=None
+            mode="counterfactual",
+            params_used=beliefs,
+            horizons=self._compute_horizon_results(T_adj),
+            posture=None,
         )
 
     def run_rolling_analysis(self, lookback_window: int = 90) -> RollingOutput:
+        """Calculates GET /history."""
         history = []
         dates = self._global_df.index[-lookback_window:]
+
         for date in dates:
+            if date not in self._macro_indices.index:
+                continue
+
+            # --- FIX: Retrieve Historical Physics Inputs ---
+            mom = self._feat_dict["mom_21d"].loc[date]
+            vol = self._feat_dict["volatility"].loc[date]
+            y_diff = self._yield_diffs.loc[date]
+            vix_z = self._vix_z.loc[date]
+            idx_rec = self._macro_indices.loc[date]
+
+            # Run Physics
+            T_base = self.physics.construct_physics_matrix(
+                mom, vol, y_diff, BeliefParams()
+            )
+            T_adj, _, _, _ = self.physics.apply_adaptive_leakage(
+                T_base, self.currencies, vix_z, idx_rec
+            )
+
+            # SR (Medium Term)
+            M = self.math.compute_sr_matrix(T_adj, self.math.get_gamma(63))
+            scores = self.math.compute_strength_scores(M)
+            ranks = np.argsort(scores)[::-1]
+
             history.append(
                 RollingDataPoint(
                     date=date.strftime("%Y-%m-%d"),
-                    rankings={c: 1 for c in self.currencies},
-                    top_iso=self.currencies[0],
-                    regime_vix=20.0,
+                    rankings={
+                        self.currencies[i]: int(np.where(ranks == i)[0][0] + 1)
+                        for i in range(len(self.currencies))
+                    },
+                    top_iso=self.currencies[ranks[0]],
+                    regime_vix=float(self._global_df.loc[date, "VIX"]),
                 )
             )
+
         return RollingOutput(history=history)
 
     def _compute_confidence(
@@ -262,8 +216,8 @@ class FXMacroEngine:
         )
 
     def _compute_posture(self, regime: RegimeData) -> ModelPosture:
-        label = regime.label
-        stress = regime.indices.stress_score
+        label, indices = regime.label, regime.indices
+        stress, direction = indices.stress_score, indices.direction_score
 
         p = {
             "usd_view": "Neutral",
@@ -274,65 +228,54 @@ class FXMacroEngine:
         }
 
         if label == "USD Wrecking Ball":
-            p = {
-                "usd_view": "Overweight",
-                "fx_risk": "Defensive",
-                "carry_view": "Avoid",
-                "hedging": "Heavy",
-                "trust_ranking": True,
-            }
+            p.update(
+                {
+                    "usd_view": "Overweight",
+                    "fx_risk": "Defensive",
+                    "carry_view": "Avoid",
+                    "hedging": "Heavy",
+                }
+            )
+        elif label == "US-Centric Stress":
+            p.update(
+                {
+                    "usd_view": "Underweight",
+                    "fx_risk": "Defensive",
+                    "carry_view": "Avoid",
+                    "hedging": "Moderate",
+                }
+            )
         elif label == "Reflation / Risk-On":
-            p = {
-                "usd_view": "Underweight",
-                "fx_risk": "Aggressive",
-                "carry_view": "Favor",
-                "hedging": "None",
-                "trust_ranking": True,
-            }
+            p.update(
+                {
+                    "usd_view": "Underweight",
+                    "fx_risk": "Aggressive",
+                    "carry_view": "Favor",
+                    "hedging": "None",
+                }
+            )
         elif label == "Tightening / Carry":
-            p["carry_view"] = "Favor"
-            p["trust_ranking"] = False
+            p.update(
+                {
+                    "usd_view": "Overweight",
+                    "fx_risk": "Selective",
+                    "carry_view": "Maximum Favor",
+                    "hedging": "Light",
+                    "trust_ranking": False,
+                }
+            )
 
-        if stress > 70:
-            p["fx_risk"] = "Prohibited"
-            p["hedging"] = "Maximum"
+        if stress > 75:
+            p.update({"fx_risk": "Prohibited", "hedging": "Maximum"})
+        if direction > 60:
+            p["usd_view"] = "Maximum Overweight"
+        elif direction < -60:
+            p["usd_view"] = "Maximum Underweight"
+
         return ModelPosture(**p)
 
-    def run_simulation(self, beliefs: BeliefParams) -> SimulationOutput:
-        # (Standard simulation logic from previous steps)
-        # Just ensure the return matches the new schema (posture can be None)
-        # ...
-        current_mom = self._feat_dict["mom_21d"].iloc[-1]
-        current_vol = self._feat_dict["volatility"].iloc[-1]
-        vix = (
-            beliefs.vix_override
-            if beliefs.vix_override
-            else float(self._global_df["VIX"].iloc[-1])
-        )
-        T = self.physics.construct_scenario_matrix(
-            current_mom, current_vol, vix, beliefs
-        )
-        # Dummy indices
-        idx_rec = self._macro_indices.iloc[-1].copy()
-        if beliefs.vix_override:
-            idx_rec["stress_score"] = min(100.0, beliefs.vix_override * 2.5)
-
-        T_adj, _, _, _ = self.physics.apply_regime_physics(T, self.currencies, idx_rec)
-        horizons = self._compute_horizon_results(T_adj)
-
-        # Create a dummy posture based on the simulated regime logic
-        # (Simplified: we won't fully recalculate regime object here for brevity)
-        return SimulationOutput(
-            mode="counterfactual", params_used=beliefs, horizons=horizons, posture=None
-        )
-
     def run_rolling_analysis(self, lookback_window: int = 90) -> RollingOutput:
-        """
-        Generates historical ranking time-series for the evolution chart (/history).
-        """
-        if self._global_df is None:
-            self.refresh_data()
-
+        """Calculates GET /history with robust error handling."""
         history = []
         dates = self._global_df.index[-lookback_window:]
 
@@ -340,36 +283,44 @@ class FXMacroEngine:
             if date not in self._macro_indices.index:
                 continue
 
-            # For history, we compute a quick 'Medium' horizon rank
-            mom = self._feat_dict["mom_21d"].loc[date]
-            vol = self._feat_dict["volatility"].loc[date]
-            vix = float(self._global_df.loc[date, "VIX"])
+            try:
+                # Retrieve inputs with 0.0 fill to prevent NaN crashes
+                mom = self._feat_dict["mom_21d"].loc[date].fillna(0)
+                vol = self._feat_dict["volatility"].loc[date].fillna(0)
+                y_diff = self._yield_diffs.loc[date].fillna(0)
+                vix_z = self._vix_z.loc[date]
+                # Handle scalar NaN
+                if pd.isna(vix_z):
+                    vix_z = 0.0
 
-            T_base = self.physics.construct_scenario_matrix(
-                mom, vol, vix, BeliefParams()
-            )
-            T_adj, _, _, _ = self.physics.apply_regime_physics(
-                T_base, self.currencies, self._macro_indices.loc[date]
-            )
+                idx_rec = self._macro_indices.loc[date]
 
-            # SR for 63 days
-            gamma = self.math.get_gamma(63)
-            M = self.math.compute_sr_matrix(T_adj, gamma)
-            scores = self.math.compute_strength_scores(M)
-
-            ranks = np.argsort(scores)[::-1]
-            rank_map = {
-                self.currencies[i]: int(np.where(ranks == i)[0][0] + 1)
-                for i in range(len(self.currencies))
-            }
-
-            history.append(
-                RollingDataPoint(
-                    date=date.strftime("%Y-%m-%d"),
-                    rankings=rank_map,
-                    top_iso=self.currencies[ranks[0]],
-                    regime_vix=vix,
+                # Run Physics
+                T_base = self.physics.construct_physics_matrix(
+                    mom, vol, y_diff, BeliefParams()
                 )
-            )
+                T_adj, _, _, _ = self.physics.apply_adaptive_leakage(
+                    T_base, self.currencies, vix_z, idx_rec
+                )
+
+                # SR (Medium Term)
+                M = self.math.compute_sr_matrix(T_adj, self.math.get_gamma(63))
+                scores = self.math.compute_strength_scores(M)
+                ranks = np.argsort(scores)[::-1]
+
+                history.append(
+                    RollingDataPoint(
+                        date=date.strftime("%Y-%m-%d"),
+                        rankings={
+                            self.currencies[i]: int(np.where(ranks == i)[0][0] + 1)
+                            for i in range(len(self.currencies))
+                        },
+                        top_iso=self.currencies[ranks[0]],
+                        regime_vix=float(self._global_df.loc[date, "VIX"]),
+                    )
+                )
+            except Exception as e:
+                # Skip bad days silently to keep the timeline intact
+                continue
 
         return RollingOutput(history=history)

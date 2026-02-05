@@ -15,10 +15,13 @@ class FeatureEngine:
     ) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
         features = {}
         log_rets = np.log(df[universe_cols] / df[universe_cols].shift(1))
+
+        # 1. Volatility (Risk)
         features["volatility"] = log_rets.rolling(21).std() * np.sqrt(252)
-        features["mom_5d"] = df[universe_cols].pct_change(5)
+
+        # 2. Momentum (Secondary Driver)
         features["mom_21d"] = df[universe_cols].pct_change(21)
-        features["mom_63d"] = df[universe_cols].pct_change(63)
+
         return features, log_rets
 
     @staticmethod
@@ -75,6 +78,8 @@ class FeatureEngine:
     def compute_macro_regime_indices(
         df: pd.DataFrame, universe_cols: List[str]
     ) -> pd.DataFrame:
+        # ... (Keep existing implementation for Breadth/Direction) ...
+        # Simplified for brevity here, assume same logic as before
         rets = np.log(df[universe_cols] / df[universe_cols].shift(1))
         breadth = (rets < 0).mean(axis=1)
         magnitude = rets.abs().mean(axis=1)
@@ -107,3 +112,30 @@ class FeatureEngine:
             },
             index=df.index,
         )
+
+    @staticmethod
+    def compute_yield_differentials(
+        yields: pd.DataFrame, universe_cols: List[str]
+    ) -> pd.DataFrame:
+        """
+        Calculates Real Yield Spread vs USD.
+        Positive = Higher Yield than USD (Attractor).
+        Negative = Lower Yield than USD (Repulsor).
+        """
+        if "USD" not in yields.columns:
+            return pd.DataFrame(0.0, index=yields.index, columns=universe_cols)
+
+        # Spread = Local - USD
+        diffs = yields[universe_cols].sub(yields["USD"], axis=0)
+        return diffs
+
+    @staticmethod
+    def compute_adaptive_tuning(series: pd.Series, window: int = 126) -> pd.Series:
+        """
+        Calculates Rolling Z-Score for adaptive constant tuning.
+        (Value - Mean) / Std
+        """
+        roll_mean = series.rolling(window).mean()
+        roll_std = series.rolling(window).std()
+        z_score = (series - roll_mean) / (roll_std + 1e-6)
+        return z_score.fillna(0)

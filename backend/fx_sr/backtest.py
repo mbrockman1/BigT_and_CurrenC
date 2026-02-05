@@ -10,6 +10,7 @@ from .features import FeatureEngine
 from .schemas import (
     BeliefParams,
     CarryData,
+    NetworkEdge,
     RegimeData,
     ValidationMetrics,
     WalkForwardOutput,
@@ -27,9 +28,16 @@ class WalkForwardEngine:
         self.physics = TransitionModel(self.config)
         self.math = SREngine(self.config)
         self.currencies = list(self.config.UNIVERSE.keys())
+
         self._df = self.loader.fetch_history(lookback_days=750)
         self._feats, _ = self.features.compute_features(self._df, self.currencies)
+
+        # Pre-compute Physics Inputs
         self._yields = self.loader.fetch_yields(self._df.index)
+        self._yield_diffs = self.features.compute_yield_differentials(
+            self._yields, self.currencies
+        )
+        self._vix_z = self.features.compute_adaptive_tuning(self._df["VIX"])
         self._carry_z = self.features.compute_carry_scores(
             self._yields, self.currencies
         )
@@ -41,7 +49,8 @@ class WalkForwardEngine:
         for i in range(len(self.currencies)):
             top_indices = np.argsort(T_viz[i])[-k:]
             for j in top_indices:
-                if T_viz[i, j] > 0.05:
+                # LOWERED THRESHOLD: 0.05 -> 0.01 to ensure lines appear even in weak flows
+                if T_viz[i, j] > 0.01:
                     edges.append(
                         {
                             "source": self.currencies[i],
@@ -51,44 +60,8 @@ class WalkForwardEngine:
                     )
         return edges
 
-    def print_performance_report(
-        self, history: List[WalkForwardSnapshot], horizon: str = "medium"
-    ):
-        """Hardened report that filters out None values from pending future weeks."""
-        print(
-            f"\n{'=' * 60}\nFX SR MODEL PERFORMANCE REPORT ({horizon.upper()})\n{'=' * 60}"
-        )
-
-        # Filter snapshots that have realized metrics
-        valid_snaps = [s for s in history if s.metrics[horizon].rank_ic is not None]
-
-        if not valid_snaps:
-            print("No completed horizons found to report on.")
-            return
-
-        base_ics = [s.metrics[horizon].sr_only_ic for s in valid_snaps]
-        blend_ics = [s.metrics[horizon].blended_ic for s in valid_snaps]
-
-        print(f"Completed Weeks:  {len(valid_snaps)}")
-        print(f"Avg SR-Only IC:   {np.mean(base_ics):.4f}")
-        print(f"Avg Blended IC:   {np.mean(blend_ics):.4f}")
-
-        # Tightening Regime Filtering
-        tight_snaps = [s for s in valid_snaps if s.carry_data.is_active]
-        if tight_snaps:
-            t_sr = [s.metrics[horizon].sr_only_ic for s in tight_snaps]
-            t_bl = [s.metrics[horizon].blended_ic for s in tight_snaps]
-            print(f"\n--- TIGHTENING REGIME IMPACT ({len(tight_snaps)} weeks) ---")
-            print(f"SR Only IC:   {np.mean(t_sr):.4f}")
-            print(f"SR+Carry IC:  {np.mean(t_bl):.4f}")
-            print(f"Improvement:  {np.mean(t_bl) - np.mean(t_sr):.4f}")
-
-        print(f"{'=' * 60}\n")
-
     def run_walk_forward(self, weeks=52):
         macro_df = self.features.compute_macro_regime_indices(self._df, self.currencies)
-
-        # Calculate sample step
         available_dates = self._df.index
         step = 5
         start_idx = len(available_dates) - (weeks * step) - 1
@@ -97,51 +70,40 @@ class WalkForwardEngine:
         anchor_dates = available_dates[start_idx::step]
 
         history_snapshots = []
+        # Correlation accumulators
+        all_preds = {h: [] for h in self.config.HORIZONS}
+        all_actuals = {h: [] for h in self.config.HORIZONS}
+
         prev_label = ""
         persistence = 0
 
-        all_preds, all_actuals = (
-            {h: [] for h in self.config.HORIZONS},
-            {h: [] for h in self.config.HORIZONS},
-        )
-
-        for date in anchor_dates:
+        for i, date in enumerate(anchor_dates):
             if date not in self._feats["mom_21d"].index:
                 continue
 
-            # Data Fetch
-            mom, vol, vix = (
-                self._feats["mom_21d"].loc[date],
-                self._feats["volatility"].loc[date],
-                float(self._df.loc[date, "VIX"]),
-            )
+            # --- FIX: Fetch Historical Physics Inputs ---
+            mom = self._feats["mom_21d"].loc[date]
+            vol = self._feats["volatility"].loc[date]
+            y_diff = self._yield_diffs.loc[date]
+            vix_z = self._vix_z.loc[date]
             indices_rec = macro_df.loc[date]
 
-            # Physics
-            T_base = self.physics.construct_scenario_matrix(
-                mom, vol, vix, BeliefParams()
+            # --- Physics ---
+            T_base = self.physics.construct_physics_matrix(
+                mom, vol, y_diff, BeliefParams()
             )
-            T_adj, leakage, net_flow, regime = self.physics.apply_regime_physics(
-                T_base, self.currencies, indices_rec
+            T_adj, leakage, net_flow, regime = self.physics.apply_adaptive_leakage(
+                T_base, self.currencies, vix_z, indices_rec
             )
 
-            # --- Persistence Logic ---
+            # Persistence
             if regime.label == prev_label:
                 persistence += 1
             else:
                 persistence = 1
 
-            # --- New Interpretation ---
-            # Using the previous loop's data for delta
-            prev_stress = 50.0  # Default for first week
-            prev_dir = 0.0
-            if len(history_snapshots) > 0:
-                last_regime = history_snapshots[-1].regime
-                prev_stress = last_regime.indices.stress_score
-                prev_dir = last_regime.indices.direction_score
-
-            posture = {
-                # Logic copied from engine._compute_posture for consistency
+            # Posture (Replicated logic)
+            p_dict = {
                 "usd_view": "Neutral",
                 "fx_risk": "Selective",
                 "carry_view": "Neutral",
@@ -149,49 +111,57 @@ class WalkForwardEngine:
                 "trust_ranking": True,
             }
             if regime.label == "USD Wrecking Ball":
-                posture = {
-                    "usd_view": "Overweight",
-                    "fx_risk": "Defensive",
-                    "carry_view": "Avoid",
-                    "hedging": "Heavy",
-                    "trust_ranking": True,
-                }
+                p_dict.update(
+                    {
+                        "usd_view": "Overweight",
+                        "fx_risk": "Defensive",
+                        "carry_view": "Avoid",
+                        "hedging": "Heavy",
+                    }
+                )
+            elif regime.label == "US-Centric Stress":
+                p_dict.update({"usd_view": "Underweight", "fx_risk": "Defensive"})
             elif regime.label == "Reflation / Risk-On":
-                posture = {
-                    "usd_view": "Underweight",
-                    "fx_risk": "Aggressive",
-                    "carry_view": "Favor",
-                    "hedging": "None",
-                    "trust_ranking": True,
-                }
+                p_dict.update(
+                    {
+                        "usd_view": "Underweight",
+                        "fx_risk": "Aggressive",
+                        "carry_view": "Favor",
+                        "hedging": "None",
+                    }
+                )
             elif regime.label == "Tightening / Carry":
-                posture["trust_ranking"] = False
-                posture["carry_view"] = "Favor"
+                p_dict.update(
+                    {
+                        "usd_view": "Overweight",
+                        "fx_risk": "Selective",
+                        "carry_view": "Maximum Favor",
+                        "trust_ranking": False,
+                    }
+                )
+            if indices_rec.stress_score > 75:
+                p_dict.update({"fx_risk": "Prohibited", "hedging": "Maximum"})
 
-            # Confidence
-            base_conf = max(0, 100 - (regime.indices.stress_score * 0.4)) + (
-                persistence * 2
-            )
-
-            # Delta
-            delta_obj = {
-                "stress_chg": float(regime.indices.stress_score - prev_stress),
-                "direction_chg": float(regime.indices.direction_score - prev_dir),
-                "regime_shift": (regime.label != prev_label),
-                "prev_label": prev_label,
-            }
-
-            prev_label = regime.label
-            # Carry
+            # Carry Logic
             is_carry_active = regime.label == "Tightening / Carry"
-            carry_z = self._carry_z.loc[date].to_dict()
+            curr_carry = (
+                self._carry_z.loc[date].to_dict()
+                if date in self._carry_z.index
+                else {c: 0.0 for c in self.currencies}
+            )
             carry_obj = CarryData(
                 is_active=is_carry_active,
                 lambda_param=1.5 if is_carry_active else 0,
                 raw_yields=self._yields.loc[date].to_dict(),
                 yield_diffs={},
-                carry_scores=carry_z,
+                carry_scores=curr_carry,
             )
+
+            # Delta Logic
+            prev_stress = (
+                macro_df.loc[anchor_dates[i - 1]].stress_score if i > 0 else 50
+            )
+            prev_dir = macro_df.loc[anchor_dates[i - 1]].direction_score if i > 0 else 0
 
             snapshot = {
                 "date": date.strftime("%Y-%m-%d"),
@@ -199,33 +169,38 @@ class WalkForwardEngine:
                 "edges": {},
                 "realized_returns": {},
                 "metrics": {},
-                "regime": regime,
-                "usd_leakage": leakage,
-                "net_usd_flow": net_flow,
-                "carry_data": carry_obj,
-                "posture": posture,
+                "regime": regime.model_dump(),
+                "posture": p_dict,
                 "confidence": {
-                    "score": base_conf,
+                    "score": float(max(0, 100 - abs(vix_z) * 20)),
                     "persistence": persistence,
-                    "is_stable": base_conf > 60,
+                    "is_stable": True,
                 },
-                "delta": delta_obj,
+                "delta": {
+                    "stress_chg": float(indices_rec.stress_score - prev_stress),
+                    "direction_chg": float(indices_rec.direction_score - prev_dir),
+                    "regime_shift": (regime.label != prev_label),
+                    "prev_label": prev_label,
+                },
+                "usd_leakage": [l.model_dump() for l in leakage],
+                "net_usd_flow": float(net_flow),
+                "carry_data": carry_obj.model_dump(),
             }
 
+            prev_label = regime.label
+
+            # SR & Validation
             for h_name, days in self.config.HORIZONS.items():
                 gamma = self.math.get_gamma(days)
                 M = self.math.compute_sr_matrix(T_adj, gamma)
                 sr_scores = self.math.compute_strength_scores(M)
 
-                # V1 Blending
-                sr_mean, sr_std = np.mean(sr_scores), np.std(sr_scores) + 1e-6
-                sr_z = (sr_scores - sr_mean) / sr_std
-
+                # Blend V1
+                sr_z = (sr_scores - np.mean(sr_scores)) / (np.std(sr_scores) + 1e-6)
+                final_scores = sr_z
                 if is_carry_active:
-                    carry_vec = np.array([carry_z[c] for c in self.currencies])
-                    final_scores = sr_z + (1.5 * carry_vec)
-                else:
-                    final_scores = sr_scores
+                    c_vec = np.array([curr_carry.get(c, 0) for c in self.currencies])
+                    final_scores = sr_z + (1.5 * c_vec)
 
                 ranks = np.argsort(final_scores)[::-1]
                 snapshot["horizon_results"][h_name] = [
@@ -242,7 +217,7 @@ class WalkForwardEngine:
                 if h_name == "medium":
                     snapshot["edges"][h_name] = self._get_top_edges(T_adj)
 
-                # Validation (Causal check)
+                # Validation
                 try:
                     fut_idx = self._df.index.get_loc(date) + days
                     if fut_idx < len(self._df):
@@ -255,6 +230,9 @@ class WalkForwardEngine:
                         corr_sr, _ = spearmanr(sr_scores, rets.values)
                         corr_blend, _ = spearmanr(final_scores, rets.values)
 
+                        all_preds[h_name].extend(final_scores)
+                        all_actuals[h_name].extend(rets.values)
+
                         snapshot["metrics"][h_name] = ValidationMetrics(
                             rank_ic=float(corr_blend),
                             top_quartile_ret=float(rets.iloc[ranks[:2]].mean()),
@@ -265,26 +243,21 @@ class WalkForwardEngine:
                             ),
                             sr_only_ic=float(corr_sr),
                             blended_ic=float(corr_blend),
-                        )
-                        all_preds[h_name].extend(final_scores)
-                        all_actuals[h_name].extend(rets.values)
+                        ).model_dump()
                     else:
-                        # Future has not happened yet
                         snapshot["metrics"][h_name] = ValidationMetrics(
                             rank_ic=None,
                             top_quartile_ret=None,
                             btm_quartile_ret=None,
                             resilience_gap=None,
-                            sr_only_ic=None,
-                            blended_ic=None,
-                        )
+                        ).model_dump()
                         snapshot["realized_returns"][h_name] = {}
                 except:
                     pass
 
             history_snapshots.append(WalkForwardSnapshot(**snapshot))
 
-        # Final Aggregation
+        # Aggregate Stats
         agg_corrs = {}
         for h in self.config.HORIZONS:
             if len(all_actuals[h]) > 10:
@@ -293,5 +266,4 @@ class WalkForwardEngine:
             else:
                 agg_corrs[h] = 0.0
 
-        self.print_performance_report(history_snapshots)
         return WalkForwardOutput(history=history_snapshots, correlations=agg_corrs)
