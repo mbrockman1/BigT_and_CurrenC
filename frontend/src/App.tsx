@@ -179,6 +179,7 @@ interface EngineOutput {
   posture: ModelPosture;
   confidence: RegimeConfidence;
   horizons: Record<string, HorizonResult[]>;
+  transition: RegimeTransition;
 }
 interface SimulationOutput {
   mode: string;
@@ -189,6 +190,13 @@ interface BeliefParams {
   trend_sensitivity: number;
   vol_penalty: number;
   vix_override?: number | null;
+}
+
+interface RegimeTransition {
+  risk_score: number;
+  next_likely_regime: string;
+  vector_desc: string;
+  is_breaking: boolean;
 }
 
 // --- Internal Components ---
@@ -320,6 +328,57 @@ const SliderControl = ({
     />
   </div>
 );
+
+const TransitionRadar = ({ transition }: { transition: RegimeTransition }) => {
+  const isSafe = transition.risk_score < 40;
+  const isCritical = transition.risk_score > 75;
+
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 shadow-sm">
+      {" "}
+      <div className="flex justify-between items-center mb-2">
+        <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+          <Activity
+            size={14}
+            className={
+              isCritical ? "text-rose-500 animate-pulse" : "text-blue-500"
+            }
+          />
+          Regime Stability
+          <InfoTooltip
+            title="Transition Radar"
+            content="Calculates the probability of a regime shift by measuring the 'Euclidean distance' of current macro data to the quadrant boundaries. High risk scores indicate the model is drifting toward a tipping point (e.g., Stress crossing 40 or DXY crossing 0), suggesting the current strategy posture may soon break."
+          />
+        </h3>
+        <span
+          className={`text-xs font-mono font-bold ${isCritical ? "text-rose-400" : isSafe ? "text-emerald-400" : "text-yellow-400"}`}
+        >
+          {transition.risk_score.toFixed(0)}% Risk
+        </span>
+      </div>
+      {/* Progress Bar */}
+      <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden mb-3">
+        <div
+          className={`h-full transition-all duration-1000 ease-out ${isCritical ? "bg-rose-500" : isSafe ? "bg-emerald-500" : "bg-yellow-500"}`}
+          style={{ width: `${transition.risk_score}%` }}
+        />
+      </div>
+      <div className="text-[10px] text-slate-300 font-medium flex justify-between items-center">
+        <span>
+          Status:{" "}
+          <span className="text-white">
+            {isSafe ? "Locked In" : "Transitioning"}
+          </span>
+        </span>
+        {transition.risk_score > 20 && (
+          <span className="flex items-center gap-1 text-slate-400">
+            → {transition.next_likely_regime}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
 
 // --- MAIN APPLICATION ---
 export default function App() {
@@ -543,11 +602,12 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                <div className="lg:col-span-5">
+                <div className="lg:col-span-5 space-y-4">
                   <PostureCard
                     posture={baseData.posture}
                     confidence={baseData.confidence}
                   />
+                  <TransitionRadar transition={baseData.transition} />
                 </div>
                 <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
                   <div className="flex justify-between items-center mb-6">

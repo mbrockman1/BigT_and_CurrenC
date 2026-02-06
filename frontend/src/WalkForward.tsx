@@ -657,52 +657,94 @@ export default function WalkForward() {
           <div className="flex-grow">
             <ResponsiveContainer width="100%" height="100%">
               <ScatterChart
-                margin={{ top: 10, right: 10, bottom: 20, left: -20 }}
+                margin={{ top: 10, right: 30, bottom: 20, left: -20 }}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-
                 <XAxis
                   type="number"
                   dataKey="score"
-                  stroke="#ffffff"
-                  tick={{ fill: "#ffffff" }}
+                  stroke="#64748b"
                   fontSize={9}
+                  tickLine={false}
+                  axisLine={false}
                 >
                   <Label
-                    value="Pred Score"
+                    value="Predicted SR Strength"
                     offset={-10}
                     position="insideBottom"
-                    fill="#ffffff"
-                    fontSize={8}
+                    fill="#475569"
+                    fontSize={9}
+                    fontWeight="bold"
                   />
                 </XAxis>
-
                 <YAxis
                   type="number"
                   dataKey="ret"
                   unit="%"
-                  stroke="#ffffff"
-                  tick={{ fill: "#ffffff" }}
+                  stroke="#64748b"
                   fontSize={9}
+                  tickLine={false}
+                  axisLine={false}
                 />
 
+                {/* HUD Tooltip */}
                 <Tooltip
                   cursor={{ strokeDasharray: "3 3" }}
-                  contentStyle={{
-                    backgroundColor: "#0f172a",
-                    border: "1px solid #334155",
-                    fontSize: "10px",
+                  content={({ payload }) => {
+                    if (payload && payload.length) {
+                      const d = payload[0].payload;
+                      return (
+                        <div className="bg-slate-950 border border-slate-700 p-2 rounded-lg shadow-2xl text-[10px] font-sans">
+                          <div className="font-black text-blue-400 border-b border-slate-800 pb-1 mb-1 uppercase tracking-tighter">
+                            {d.iso} Snapshot
+                          </div>
+                          <div className="flex justify-between gap-4">
+                            <span className="text-slate-500">
+                              Predicted Score:
+                            </span>
+                            <span className="text-white font-mono">
+                              {d.score.toFixed(2)}
+                            </span>
+                          </div>
+                          <div className="flex justify-between gap-4">
+                            <span className="text-slate-500">
+                              Realized Return:
+                            </span>
+                            <span
+                              className={
+                                d.ret >= 0
+                                  ? "text-emerald-400"
+                                  : "text-rose-400"
+                              }
+                            >
+                              {d.ret >= 0 ? "+" : ""}
+                              {d.ret.toFixed(2)}%
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    }
+                    return null;
                   }}
-                  labelStyle={{ color: "#fff" }}
-                  itemStyle={{ color: "#fff" }}
                 />
 
                 <ReferenceLine y={0} stroke="#334155" />
-
                 <Scatter name="FX" data={scatterData}>
-                  {scatterData.map((e: any, i: number) => (
-                    <Cell key={i} fill={e.ret > 0 ? "#10b981" : "#ef4444"} />
+                  {scatterData.map((entry: any, index: number) => (
+                    <Cell
+                      key={index}
+                      fill={entry.ret > 0 ? "#10b981" : "#ef4444"}
+                    />
                   ))}
+                  {/* ADDED LABELS TO THE DOTS */}
+                  <LabelList
+                    dataKey="iso"
+                    position="top"
+                    fill="#94a3b8"
+                    fontSize={10}
+                    fontWeight="bold"
+                    offset={8} // Pushes text slightly above the dot
+                  />
                 </Scatter>
               </ScatterChart>
             </ResponsiveContainer>

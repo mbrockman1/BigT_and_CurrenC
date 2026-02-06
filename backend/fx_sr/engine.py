@@ -13,6 +13,7 @@ from .schemas import (
     ModelPosture,
     RegimeConfidence,
     RegimeData,
+    RegimeTransition,
     RollingDataPoint,
     RollingOutput,
     SimulationOutput,
@@ -50,6 +51,91 @@ class FXMacroEngine:
         self._vix_z = self.features.compute_adaptive_tuning(self._global_df["VIX"])
 
         print(f"Engine Ready. Records: {len(self._global_df)}")
+
+    def _compute_transition_risk(
+        self, indices: MacroIndices, delta: WeeklyDelta
+    ) -> RegimeTransition:
+        """
+        Calculates the probability of a regime shift based on proximity to
+        boundaries (Stress=40, Dir=0) and velocity (Delta).
+        """
+        s = indices.stress_score
+        d = indices.direction_score
+
+        # 1. Distances to Boundaries
+        # Stress Boundary is 40. Direction Boundary is 0.
+        dist_s = abs(s - 40)
+        dist_d = abs(d - 0)
+
+        # Normalize distance to a Risk Score (Closer = Higher Risk)
+        # We assume a distance of 20 units is "Safe". Distance 0 is "Breaking".
+        risk_s = max(
+            0, 100 - (dist_s * 5)
+        )  # 5x multiplier implies 20 units away = 0 risk
+        risk_d = max(
+            0, 100 - (dist_d * 2)
+        )  # Direction is wider (-100 to 100), so 50 units = 0 risk
+
+        # 2. Velocity Adjustment
+        # If we are moving TOWARD the boundary, risk increases.
+        # Check Stress Direction
+        moving_to_stress_boundary = (s < 40 and delta.stress_chg > 0) or (
+            s > 40 and delta.stress_chg < 0
+        )
+        if moving_to_stress_boundary:
+            risk_s *= 1.2
+
+        # Check Direction Boundary
+        moving_to_dir_boundary = (d < 0 and delta.direction_chg > 0) or (
+            d > 0 and delta.direction_chg < 0
+        )
+        if moving_to_dir_boundary:
+            risk_d *= 1.2
+
+        # 3. Identify Primary Risk Vector
+        total_risk = max(risk_s, risk_d)
+        total_risk = min(99.0, total_risk)  # Cap at 99
+
+        # 4. Identify Next Regime
+        # Hypothetical: If we cross the nearest boundary, where are we?
+        next_s = s + (10 if s < 40 else -10)  # Cross S boundary
+        next_d = d + (10 if d < 0 else -10)  # Cross D boundary
+
+        # Which boundary is closer?
+        next_regime = "Uncertain"
+        if risk_s > risk_d:
+            # Crossing Stress Boundary
+            is_high_now = s > 40
+            # If high now, next is low. If low now, next is high.
+            target_high = not is_high_now
+            target_up = d > 0
+            if target_high and target_up:
+                next_regime = "USD Wrecking Ball"
+            elif target_high and not target_up:
+                next_regime = "US-Centric Stress"
+            elif not target_high and target_up:
+                next_regime = "Tightening / Carry"
+            else:
+                next_regime = "Reflation / Risk-On"
+        else:
+            # Crossing Direction Boundary
+            target_high = s > 40
+            target_up = not (d > 0)
+            if target_high and target_up:
+                next_regime = "USD Wrecking Ball"
+            elif target_high and not target_up:
+                next_regime = "US-Centric Stress"
+            elif not target_high and target_up:
+                next_regime = "Tightening / Carry"
+            else:
+                next_regime = "Reflation / Risk-On"
+
+        return RegimeTransition(
+            risk_score=float(total_risk),
+            next_likely_regime=next_regime,
+            vector_desc=f"Drifting toward {next_regime}",
+            is_breaking=total_risk > 75,
+        )
 
     def _compute_horizon_results(
         self, T_adj: np.ndarray
@@ -93,26 +179,32 @@ class FXMacroEngine:
         horizons = self._compute_horizon_results(T_adj)
         posture = self._compute_posture(regime)
 
+        # 1. Instantiate Delta Object (Needed for Transition Risk calculation)
+        delta = WeeklyDelta(
+            stress_chg=float(idx_rec.stress_score - prev_idx.stress_score),
+            direction_chg=float(idx_rec.direction_score - prev_idx.direction_score),
+            regime_shift=(regime.label != "Unknown"),
+            prev_label=None,
+        )
+
+        # 2. Calculate Transition Risk
+        transition = self._compute_transition_risk(idx_rec, delta)
+
         return {
             "date": self._global_df.index[-1].strftime("%Y-%m-%d"),
             "regime": regime.model_dump(),
+            "transition": transition.model_dump(),  # <--- Added Field
             "posture": posture.model_dump(),
             "confidence": {
                 "score": float(max(0, 100 - (abs(vix_z) * 20))),
                 "persistence": 1,
                 "is_stable": True,
             },
-            "delta": {
-                "stress_chg": float(idx_rec.stress_score - prev_idx.stress_score),
-                "direction_chg": float(
-                    idx_rec.direction_score - prev_idx.direction_score
-                ),
-                "regime_shift": (regime.label != "Unknown"),
-                "prev_label": None,
-            },
+            "delta": delta.model_dump(),
             "horizons": {
                 k: [item.model_dump() for item in v] for k, v in horizons.items()
             },
+            "transition": transition.model_dump(),
         }
 
     def run_simulation(self, beliefs: BeliefParams) -> SimulationOutput:

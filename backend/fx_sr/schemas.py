@@ -93,6 +93,13 @@ class RegimeConfidence(BaseModel):
     is_stable: bool  # True if score > 50
 
 
+class RegimeTransition(BaseModel):
+    risk_score: float  # 0-100 (0=Stable, 100=Breakout Imminent)
+    next_likely_regime: str  # The regime across the nearest boundary
+    vector_desc: str  # e.g. "Drifting toward Reflation"
+    is_breaking: bool  # True if Risk > 75
+
+
 class WeeklyDelta(BaseModel):
     stress_chg: float
     direction_chg: float
@@ -102,11 +109,12 @@ class WeeklyDelta(BaseModel):
 
 class EngineOutput(BaseModel):
     date: str
-    regime: Any  # RegimeData
-    posture: ModelPosture  # <--- NEW
-    confidence: RegimeConfidence  # <--- NEW
-    delta: WeeklyDelta  # <--- NEW
-    horizons: Dict[str, List[Any]]  # HorizonResult
+    regime: RegimeData
+    transition: RegimeTransition  # <--- NEW FIELD
+    posture: ModelPosture
+    confidence: RegimeConfidence
+    delta: WeeklyDelta
+    horizons: Dict[str, List[HorizonResult]]
 
 
 class SimulationOutput(BaseModel):
@@ -152,8 +160,7 @@ class WalkForwardSnapshot(BaseModel):
     usd_leakage: List[Any]
     net_usd_flow: float
     carry_data: Any
-
-    # NEW fields for history viz
+    transition: RegimeTransition  # <--- NEW FIELD
     posture: ModelPosture
     confidence: RegimeConfidence
     delta: WeeklyDelta
