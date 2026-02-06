@@ -469,10 +469,14 @@ const MarketNarrative = ({ snapshot }: { snapshot: Snapshot }) => (
         <Zap size={14} className="text-yellow-500" />
         <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
           Macro Context
+          <InfoTooltip
+            title="Market Intelligence"
+            content="A high-level synthesis of the active regime. This section translates mathematical network flows, liquidity leakage, and risk indices into a qualitative summary of current capital behavior and USD dominance."
+          />
         </h4>
       </div>
       {!snapshot.posture.trust_ranking && (
-        <div className="bg-rose-500/10 text-rose-400 text-[9px] font-black px-2 rounded border border-rose-500/20 flex items-center gap-1">
+        <div className="bg-rose-500/10 text-rose-400 text-[9px] font-black px-2 rounded border border-rose-500/30 flex items-center gap-1">
           <AlertTriangle size={10} /> LOW ACCURACY REGIME
         </div>
       )}
