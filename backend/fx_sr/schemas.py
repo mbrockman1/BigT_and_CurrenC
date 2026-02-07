@@ -2,11 +2,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-# ==========================================
-# 1. Basic Components
-# ==========================================
 
-
+# --- 1. Basic Components ---
 class HorizonResult(BaseModel):
     iso: str
     score: float
@@ -22,6 +19,7 @@ class MacroIndices(BaseModel):
     stress_vol: float
     usd_momentum: float
     yield_delta: float
+    vix: Optional[float]  # <--- Add this field
 
 
 class RegimeData(BaseModel):
@@ -30,11 +28,36 @@ class RegimeData(BaseModel):
     indices: MacroIndices
 
 
-# ==========================================
-# 2. Input Parameters (Beliefs & Shocks)
-# ==========================================
+# --- 2. Posture Definitions ---
 
 
+# OLD Simple Posture (Keep for Backtest History)
+class ModelPosture(BaseModel):
+    usd_view: str
+    fx_risk: str
+    carry_view: str
+    hedging: str
+    trust_ranking: bool
+
+
+# NEW Institutional Posture (For Dashboard & Simulation)
+class MarketForces(BaseModel):
+    rewarding: List[str]
+    penalizing: List[str]
+
+
+class InstitutionalPosture(BaseModel):
+    headline: str
+    usd_gauge: int
+    risk_gauge: int
+    carry_gauge: int
+    hedging_gauge: int
+    forces: MarketForces
+    interpretation: str
+    trust_ranking: bool
+
+
+# --- 3. Inputs & History ---
 class ShockParams(BaseModel):
     iso: Optional[str] = None
     vol_shock: float = 1.0
@@ -49,9 +72,32 @@ class BeliefParams(BaseModel):
     shocks: Optional[List[ShockParams]] = []
 
 
-# ==========================================
-# 3. Carry & USD Layer
-# ==========================================
+class DailyDiff(BaseModel):
+    stress_delta: float
+    direction_delta: float
+    regime_changed: bool
+    prev_regime: Optional[str]
+    confidence_delta: float
+
+
+class RegimeConfidence(BaseModel):
+    score: float
+    persistence: int
+    is_stable: bool
+
+
+class WeeklyDelta(BaseModel):
+    stress_delta: float
+    direction_delta: float
+    regime_shift: bool
+    prev_label: Optional[str]
+
+
+class RegimeTransition(BaseModel):
+    risk_score: float
+    next_likely_regime: str
+    vector_desc: str
+    is_breaking: bool
 
 
 class CarryData(BaseModel):
@@ -62,69 +108,42 @@ class CarryData(BaseModel):
     carry_scores: Dict[str, float]
 
 
+class NetworkEdge(BaseModel):
+    source: str
+    target: str
+    weight: float
+
+
 class USDLeakageNode(BaseModel):
     iso: str
     leakage_prob: float
     is_source: bool
 
 
-class NetworkEdge(BaseModel):  # <--- WAS MISSING
-    source: str
-    target: str
-    weight: float
+# --- 4. API Output Models ---
 
 
-# ==========================================
-# 4. API Output Models
-# ==========================================
-
-
-class ModelPosture(BaseModel):
-    usd_view: str  # "Overweight", "Neutral", "Underweight"
-    fx_risk: str  # "Aggressive", "Selective", "Defensive"
-    carry_view: str  # "Favor", "Neutral", "Avoid"
-    hedging: str  # "None", "Light", "Heavy"
-    trust_ranking: bool  # False if historical IC for this regime is poor
-
-
-class RegimeConfidence(BaseModel):
-    score: float  # 0-100
-    persistence: int  # Weeks in current regime
-    is_stable: bool  # True if score > 50
-
-
-class RegimeTransition(BaseModel):
-    risk_score: float  # 0-100 (0=Stable, 100=Breakout Imminent)
-    next_likely_regime: str  # The regime across the nearest boundary
-    vector_desc: str  # e.g. "Drifting toward Reflation"
-    is_breaking: bool  # True if Risk > 75
-
-
-class WeeklyDelta(BaseModel):
-    stress_chg: float
-    direction_chg: float
-    regime_shift: bool
-    prev_label: Optional[str]
-
-
+# Dashboard (/latest)
 class EngineOutput(BaseModel):
     date: str
     regime: RegimeData
-    transition: RegimeTransition  # <--- NEW FIELD
-    posture: ModelPosture
+    posture: InstitutionalPosture
     confidence: RegimeConfidence
-    delta: WeeklyDelta
+    diff: DailyDiff
+    transition: RegimeTransition
     horizons: Dict[str, List[HorizonResult]]
 
 
+# Simulation (/simulate)
+# !!! THIS MUST BE InstitutionalPosture !!!
 class SimulationOutput(BaseModel):
     mode: str
-    params_used: Any
-    horizons: Dict[str, List[Any]]
-    # Add dummy posture for simulation
-    posture: Optional[ModelPosture] = None
+    params_used: BeliefParams
+    horizons: Dict[str, List[HorizonResult]]
+    posture: InstitutionalPosture
 
 
+# Rolling History (/history)
 class RollingDataPoint(BaseModel):
     date: str
     rankings: Dict[str, int]
@@ -136,9 +155,26 @@ class RollingOutput(BaseModel):
     history: List[RollingDataPoint]
 
 
-# ==========================================
-# 5. Walk-Forward Validation
-# ==========================================
+# Backtest (/walkforward)
+class WalkForwardSnapshot(BaseModel):
+    date: str
+    horizon_results: Dict[str, List[Dict[str, Any]]]
+    edges: Dict[str, List[NetworkEdge]]
+    realized_returns: Dict[str, Dict[str, float]]
+    metrics: Dict[str, Any]
+    regime: RegimeData
+    posture: ModelPosture  # Backtest uses the Simple version
+    confidence: RegimeConfidence
+    delta: WeeklyDelta
+    transition: RegimeTransition
+    usd_leakage: List[USDLeakageNode]
+    net_usd_flow: float
+    carry_data: CarryData
+
+
+class WalkForwardOutput(BaseModel):
+    history: List[WalkForwardSnapshot]
+    correlations: Dict[str, float]
 
 
 class ValidationMetrics(BaseModel):
@@ -148,30 +184,3 @@ class ValidationMetrics(BaseModel):
     resilience_gap: Optional[float]
     sr_only_ic: Optional[float] = None
     blended_ic: Optional[float] = None
-
-
-class WalkForwardSnapshot(BaseModel):
-    date: str
-    horizon_results: Dict[str, List[Dict[str, Any]]]
-    edges: Dict[str, List[Dict[str, Any]]]
-    realized_returns: Dict[str, Dict[str, float]]
-    metrics: Dict[str, Any]
-    regime: Any
-    usd_leakage: List[Any]
-    net_usd_flow: float
-    carry_data: Any
-    transition: RegimeTransition  # <--- NEW FIELD
-    posture: ModelPosture
-    confidence: RegimeConfidence
-    delta: WeeklyDelta
-
-
-class WalkForwardOutput(BaseModel):
-    history: List[WalkForwardSnapshot]
-    correlations: Dict[str, float]
-
-
-class RegimeConfidence(BaseModel):
-    score: float  # 0-100
-    persistence: int  # Weeks in current regime
-    is_stable: bool  # True if score > 50

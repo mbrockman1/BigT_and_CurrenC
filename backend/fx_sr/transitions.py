@@ -102,6 +102,7 @@ class TransitionModel:
                 stress_vol=float(indices["stress_vol"]),
                 usd_momentum=float(indices["usd_mom"]),
                 yield_delta=float(indices["yield_delta"]),
+                vix=float(indices["vix"]),
             ),
         )
 
@@ -277,6 +278,7 @@ class TransitionModel:
                 stress_vol=0.5,
                 usd_momentum=0.0,
                 yield_delta=0.0,
+                vix=float(indices["vix"]),
             ),
         )
 

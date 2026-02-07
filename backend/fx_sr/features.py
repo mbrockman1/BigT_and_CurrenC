@@ -100,7 +100,6 @@ class FeatureEngine:
         )
 
         direction_idx = ((dxy_ret * 50.0) + (yield_chg * 100.0)).clip(-1, 1) * 100
-
         return pd.DataFrame(
             {
                 "stress_score": stress_idx,
@@ -109,6 +108,7 @@ class FeatureEngine:
                 "stress_vol": dispersion.rolling(5).mean(),
                 "usd_mom": dxy_ret,
                 "yield_delta": yield_chg,
+                "vix": df["VIX"],  # <--- Ensure raw VIX is passed through
             },
             index=df.index,
         )

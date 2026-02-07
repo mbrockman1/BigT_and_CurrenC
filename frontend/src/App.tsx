@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import {
+  ArrowUp,
+  ArrowDown,
+  Minus,
+  Shield,
+  TrendingUp,
+  Anchor,
   Activity,
   Calendar,
   ShieldAlert,
@@ -163,6 +169,7 @@ interface MacroIndices {
   stress_vol: number;
   usd_momentum: number;
   yield_delta: number;
+  vix: number; // <--- Add this
 }
 interface RegimeData {
   label: string;
@@ -177,15 +184,17 @@ interface RegimeConfidence {
 interface EngineOutput {
   date: string;
   regime: RegimeData;
-  posture: ModelPosture;
+  posture: InstitutionalPosture; // Dashboard uses this
   confidence: RegimeConfidence;
-  horizons: Record<string, HorizonResult[]>;
+  delta: WeeklyDelta;
   transition: RegimeTransition;
+  horizons: Record<string, HorizonResult[]>;
+  diff: DailyDiff;
 }
 interface SimulationOutput {
   mode: string;
   horizons: Record<string, HorizonResult[]>;
-  posture: ModelPosture;
+  posture: InstitutionalPosture; // Simulator uses this now
 }
 interface BeliefParams {
   risk_mix: number;
@@ -201,7 +210,182 @@ interface RegimeTransition {
   is_breaking: boolean;
 }
 
+interface MarketForces {
+  rewarding: string[];
+  penalizing: string[];
+}
+
+interface InstitutionalPosture {
+  headline: string;
+  usd_gauge: number;
+  risk_gauge: number;
+  carry_gauge: number;
+  hedging_gauge: number;
+  forces: MarketForces;
+  interpretation: string;
+  trust_ranking: boolean;
+}
+
+interface DailyDiff {
+  stress_delta: number;
+  direction_delta: number;
+  regime_changed: boolean;
+  prev_regime: string | null;
+  confidence_delta: number;
+}
+
 // --- Internal Components ---
+const MarketPosturePanel = ({
+  posture,
+  diff,
+}: {
+  posture: InstitutionalPosture;
+  diff: DailyDiff;
+}) => {
+  // Helper for the gauge bars
+  const Gauge = ({
+    label,
+    value,
+    color,
+  }: {
+    label: string;
+    value: number;
+    color: string;
+  }) => (
+    <div className="mb-3">
+      <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest mb-1 text-slate-400">
+        <span>{label}</span>
+        <span className="text-white">{value}%</span>
+      </div>
+      <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden">
+        <div
+          className={`h-full transition-all duration-1000 ${color}`}
+          style={{ width: `${value}%` }}
+        />
+      </div>
+    </div>
+  );
+
+  // Helper for Diffs
+  const DeltaIndicator = ({ val, label }: { val: number; label: string }) => {
+    if (Math.abs(val) < 1) return null; // Hide noise
+    const isPos = val > 0;
+    return (
+      <div
+        className={`flex items-center gap-1 text-[9px] font-bold uppercase px-2 py-1 rounded border ${isPos ? "bg-slate-800 border-slate-700 text-slate-300" : "bg-slate-800 border-slate-700 text-slate-300"}`}
+      >
+        {isPos ? (
+          <ArrowUp size={10} className="text-emerald-400" />
+        ) : (
+          <ArrowDown size={10} className="text-rose-400" />
+        )}
+        <span>
+          {label} {Math.abs(val).toFixed(0)}
+        </span>
+      </div>
+    );
+  };
+
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl mb-6">
+      {/* 1. Header: Headline & Change */}
+      <div className="p-5 border-b border-slate-800 bg-gradient-to-r from-slate-900 to-slate-800/50">
+        <div className="flex justify-between items-start">
+          <div>
+            <h2 className="text-2xl font-black text-white uppercase tracking-tighter leading-none">
+              {posture.headline}
+            </h2>
+            <div className="flex gap-2 mt-3">
+              {diff.regime_changed && (
+                <span className="text-[9px] font-bold bg-blue-600 text-white px-2 py-1 rounded animate-pulse">
+                  Regime Shift: Was {diff.prev_regime}
+                </span>
+              )}
+              <DeltaIndicator val={diff.stress_delta} label="Stress" />
+              <DeltaIndicator val={diff.direction_delta} label="USD Trend" />
+              <DeltaIndicator val={diff.confidence_delta} label="Confidence" />
+            </div>
+          </div>
+          <Shield className="text-slate-700 opacity-20" size={48} />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2">
+        {/* 2. Gauges (Constraints) */}
+        <div className="p-5 border-r border-slate-800">
+          <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4">
+            Operational Constraints
+          </h4>
+          <Gauge
+            label="USD Bias (Long)"
+            value={posture.usd_gauge}
+            color="bg-blue-500"
+          />
+          <Gauge
+            label="Risk Budget"
+            value={posture.risk_gauge}
+            color="bg-emerald-500"
+          />
+          <Gauge
+            label="Carry Viability"
+            value={posture.carry_gauge}
+            color="bg-yellow-500"
+          />
+          <Gauge
+            label="Hedging Pressure"
+            value={posture.hedging_gauge}
+            color="bg-rose-500"
+          />
+        </div>
+
+        {/* 3. Forces & Interpretation */}
+        <div className="p-5 flex flex-col justify-between">
+          <div>
+            <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3">
+              Market Forces
+            </h4>
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div>
+                <span className="text-[9px] text-emerald-400 font-bold block mb-1">
+                  REWARDING
+                </span>
+                <ul className="text-[10px] text-slate-300 space-y-1">
+                  {posture.forces.rewarding.map((f) => (
+                    <li key={f} className="flex items-center gap-1">
+                      <Zap size={8} className="text-emerald-500" /> {f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <span className="text-[9px] text-rose-400 font-bold block mb-1">
+                  PENALIZING
+                </span>
+                <ul className="text-[10px] text-slate-300 space-y-1">
+                  {posture.forces.penalizing.map((f) => (
+                    <li key={f} className="flex items-center gap-1">
+                      <Minus size={8} className="text-rose-500" /> {f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
+            <h5 className="text-[9px] font-bold text-blue-400 uppercase mb-1">
+              Interpretation
+            </h5>
+            <p className="text-xs text-slate-300 italic leading-snug">
+              "{posture.interpretation}"
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const StatCard = ({ label, value, subtext, icon: Icon, colorClass }: any) => (
   <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-start space-x-4 shadow-sm hover:border-slate-700 transition-colors">
     <div
@@ -460,14 +644,22 @@ export default function App() {
 
   // Inside the App() component function:
   const activeHorizons = simData ? simData.horizons : baseData.horizons;
-  const currentList = activeHorizons[horizon] || [];
-
-  // NEW: Logic to switch between Real Advice and Simulated Advice
-  const currentPosture = simData ? simData.posture : baseData.posture;
-  const currentConfidence = baseData.confidence;
-  const currentRegime = simData ? baseData.regime : baseData.regime; // Keep base regime labels for simplicity
   const isCounterfactual =
-    riskMix !== 0.5 || trendSens !== 1.0 || volPen !== 1.0;
+    Math.abs(riskMix - 0.5) > 0.01 ||
+    Math.abs(trendSens - 1.0) > 0.01 ||
+    Math.abs(volPen - 1.0) > 0.01;
+
+  const useSim = isCounterfactual && simData;
+  const currentList = useSim
+    ? simData.horizons[horizon]
+    : baseData.horizons[horizon];
+  // NEW: Logic to switch between Real Advice and Simulated Advice
+  const currentPosture = useSim ? simData.posture : baseData.posture;
+
+  const currentConfidence = baseData.confidence;
+  const currentRegime = useSim
+    ? { ...baseData.regime, label: `Simulated: ${simData.posture.headline}` }
+    : baseData.regime;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-sans p-4 md:p-8">
@@ -550,7 +742,7 @@ export default function App() {
             </div>
 
             <div className="lg:col-span-9 space-y-6">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <StatCard
                   label={
                     <>
@@ -561,8 +753,12 @@ export default function App() {
                       />
                     </>
                   }
-                  value={baseData.regime.label}
-                  subtext={baseData.regime.desc}
+                  value={useSim ? "Simulation" : currentRegime.label}
+                  subtext={
+                    useSim
+                      ? "Viewing counterfactual scenario"
+                      : currentRegime.desc
+                  }
                   icon={ShieldAlert}
                   colorClass={
                     baseData.regime.indices.stress_score > 40
@@ -601,6 +797,21 @@ export default function App() {
                   colorClass="text-purple-500"
                 />
                 <StatCard
+                  label={
+                    <>
+                      VIX Index{" "}
+                      <InfoTooltip
+                        title="Market Fear"
+                        content="The CBOE Volatility Index. Measures S&P 500 implied volatility; used here as a global risk-off baseline."
+                      />
+                    </>
+                  }
+                  value={baseData.regime.indices.vix.toFixed(2)}
+                  subtext="Equity Vol Proxy"
+                  icon={Activity}
+                  colorClass="text-rose-400"
+                />
+                <StatCard
                   label="Top Pick"
                   value={currentList[0]?.iso || "---"}
                   subtext={`Horizon: ${horizon}`}
@@ -611,9 +822,21 @@ export default function App() {
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                 <div className="lg:col-span-5 space-y-4">
-                  <PostureCard
+                  <MarketPosturePanel
                     posture={currentPosture}
-                    confidence={currentConfidence}
+                    // If simulating, pass a 'empty' diff so we don't show real-world deltas
+                    // on a hypothetical scenario
+                    diff={
+                      useSim
+                        ? {
+                            stress_delta: 0,
+                            direction_delta: 0,
+                            regime_changed: false,
+                            prev_regime: null,
+                            confidence_delta: 0,
+                          }
+                        : baseData.diff
+                    }
                   />
                   <TransitionRadar transition={baseData.transition} />
                 </div>
