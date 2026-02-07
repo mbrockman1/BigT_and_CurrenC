@@ -140,22 +140,34 @@ class FXMacroEngine:
     def _compute_horizon_results(
         self, T_adj: np.ndarray
     ) -> Dict[str, List[HorizonResult]]:
+        """Computes SR scores and STRICTLY ranks them 1-8."""
         results = {}
         for h_name, days in self.config.HORIZONS.items():
             gamma = self.math.get_gamma(days)
             M = self.math.compute_sr_matrix(T_adj, gamma)
             scores = self.math.compute_strength_scores(M)
-            ranks = np.argsort(scores)[::-1]
-            results[h_name] = [
-                HorizonResult(
-                    iso=self.currencies[i],
-                    score=round(float(scores[i]), 4),
-                    rank=int(np.where(ranks == i)[0][0] + 1),
-                    delta=0,
-                    trend="Gaining",
+
+            # Create pairs of (iso, score)
+            scored_nodes = []
+            for i, iso in enumerate(self.currencies):
+                scored_nodes.append({"iso": iso, "score": float(scores[i])})
+
+            # STRICT SORT: Highest score first
+            scored_nodes.sort(key=lambda x: x["score"], reverse=True)
+
+            # Assign ranks based on sorted position
+            h_list = []
+            for rank_idx, node in enumerate(scored_nodes, 1):
+                h_list.append(
+                    HorizonResult(
+                        iso=node["iso"],
+                        score=round(node["score"], 4),
+                        rank=rank_idx,
+                        delta=0.0,
+                        trend="Gaining",
+                    )
                 )
-                for i in range(len(self.currencies))
-            ]
+            results[h_name] = h_list
         return results
 
     def run_eod_cycle(self) -> Dict[str, Any]:
@@ -208,38 +220,45 @@ class FXMacroEngine:
         }
 
     def run_simulation(self, beliefs: BeliefParams) -> SimulationOutput:
-        """Calculates POST /simulate."""
+        """Handles POST /simulate - Now with simulated Posture and Stability."""
         mom = self._feat_dict["mom_21d"].iloc[-1]
         vol = self._feat_dict["volatility"].iloc[-1]
         y_diff = self._yield_diffs.iloc[-1]
 
-        # Recalculate VIX Z for simulation override
+        # 1. Logic Overrides
         vix_actual = float(self._global_df["VIX"].iloc[-1])
         vix_to_use = (
             beliefs.vix_override if beliefs.vix_override is not None else vix_actual
         )
 
-        # Approx Z-score update
+        # Calculate a simulated VIX Z-Score for the physics engine
         mean_vix = self._global_df["VIX"].rolling(126).mean().iloc[-1]
         std_vix = self._global_df["VIX"].rolling(126).std().iloc[-1]
         vix_z = (vix_to_use - mean_vix) / (std_vix + 1e-6)
 
         T_base = self.physics.construct_physics_matrix(mom, vol, y_diff, beliefs)
 
-        # Adjust stress score for regime label
+        # 2. Adjust Simulated Indices
+        # If user slides to 'Wrecking Ball', we simulate high stress indices
         idx_rec = self._macro_indices.iloc[-1].copy()
-        if beliefs.vix_override:
-            idx_rec["stress_score"] = min(100.0, beliefs.vix_override * 2.5)
+        idx_rec["stress_score"] = beliefs.risk_mix * 100.0
+        idx_rec["direction_score"] = (
+            beliefs.risk_mix * 50.0
+        )  # Assume USD strength in risk-off
 
-        T_adj, _, _, _ = self.physics.apply_adaptive_leakage(
+        T_adj, _, _, regime = self.physics.apply_adaptive_leakage(
             T_base, self.currencies, vix_z, idx_rec
         )
+
+        # 3. Re-calculate Posture and Horizons for the 'What-If' scenario
+        horizons = self._compute_horizon_results(T_adj)
+        posture = self._compute_posture(regime)  # <--- NOW SIMULATED
 
         return SimulationOutput(
             mode="counterfactual",
             params_used=beliefs,
-            horizons=self._compute_horizon_results(T_adj),
-            posture=None,
+            horizons=horizons,
+            posture=posture,  # <--- NOW RETURNED TO FRONTEND
         )
 
     def run_rolling_analysis(self, lookback_window: int = 90) -> RollingOutput:

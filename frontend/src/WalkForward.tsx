@@ -348,10 +348,11 @@ const ModernCapitalTopology = ({
 
 // --- 2. MODERN OCCUPANCY MAP (Bar Chart) ---
 export const ModernOccupancyMap = ({ data }: { data: any[] }) => {
+  const sortedData = [...data].sort((a, b) => b.score - a.score);
   return (
     <ResponsiveContainer width="100%" height="100%">
       <BarChart
-        data={data}
+        data={sortedData}
         layout="vertical"
         margin={{ left: 10, right: 15, top: 10, bottom: 5 }}
       >

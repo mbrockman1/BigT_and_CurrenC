@@ -53,10 +53,11 @@ const InfoTooltip = ({
 
 // --- REUSED COMPONENT: ModernOccupancyMap ---
 const ModernOccupancyMap = ({ data }: { data: any[] }) => {
+  const sortedData = [...data].sort((a, b) => b.score - a.score);
   return (
     <ResponsiveContainer width="100%" height="100%">
       <BarChart
-        data={data}
+        data={sortedData}
         layout="vertical"
         margin={{ left: 0, right: 15, top: 10, bottom: 5 }}
       >
@@ -184,6 +185,7 @@ interface EngineOutput {
 interface SimulationOutput {
   mode: string;
   horizons: Record<string, HorizonResult[]>;
+  posture: ModelPosture;
 }
 interface BeliefParams {
   risk_mix: number;
@@ -456,8 +458,14 @@ export default function App() {
       </div>
     );
 
+  // Inside the App() component function:
   const activeHorizons = simData ? simData.horizons : baseData.horizons;
   const currentList = activeHorizons[horizon] || [];
+
+  // NEW: Logic to switch between Real Advice and Simulated Advice
+  const currentPosture = simData ? simData.posture : baseData.posture;
+  const currentConfidence = baseData.confidence;
+  const currentRegime = simData ? baseData.regime : baseData.regime; // Keep base regime labels for simplicity
   const isCounterfactual =
     riskMix !== 0.5 || trendSens !== 1.0 || volPen !== 1.0;
 
@@ -604,8 +612,8 @@ export default function App() {
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                 <div className="lg:col-span-5 space-y-4">
                   <PostureCard
-                    posture={baseData.posture}
-                    confidence={baseData.confidence}
+                    posture={currentPosture}
+                    confidence={currentConfidence}
                   />
                   <TransitionRadar transition={baseData.transition} />
                 </div>
