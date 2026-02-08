@@ -15,6 +15,27 @@ class TransitionModel:
     def __init__(self, config: FXConfig):
         self.config = config
 
+    def _robust_scale(self, series: pd.Series) -> np.ndarray:
+        """
+        Robust Normalization using Median and MAD.
+        Prevents outliers (e.g., flash crashes) from distorting the Physics.
+        """
+        # arr = series.fillna(0).to_numpy(dtype=float)
+        # median = np.median(arr)
+        # # MAD = Median(|x - median|)
+        # mad = np.median(np.abs(arr - median))
+
+        # # Avoid division by zero. If MAD is 0, fallback to std.
+        # scale = mad * 1.4826 if mad > 1e-6 else (np.std(arr) + 1e-6)
+
+        # # Calculate Robust Z
+        # z = (arr - median) / scale
+
+        # # Clip extreme outliers (-3 to +3) to stabilize Softmax
+        # return np.clip(z, -3.0, 3.0)
+        arr = series.fillna(0).to_numpy(dtype=float)
+        return (arr - arr.mean()) / (arr.std() + 1e-6)
+
     def apply_regime_physics(
         self,
         T: np.ndarray,
@@ -171,27 +192,26 @@ class TransitionModel:
         n = len(currencies)
         weights = np.zeros((n, n), dtype=float)
 
-        # --- THE 'CENTER OF GRAVITY' FIX ---
-        # We must acknowledge that in the current era, High Yield = High Risk.
+        # --- DATA-DERIVED PHYSICS (OPTIMIZER OUTPUT) ---
+        # The optimizer found that the regime break is at Mean VIX (0.0).
+        is_stress = vix_z > 0.00
 
-        # 1. Define Regime Intensity
-        # If VIX Z is high, we enter 'Preservation Mode'
-        is_stressed = vix_z > 0.5
-
-        if is_stressed:
-            # CRISIS PHYSICS: Capital seeks the 'Deepest Sinks'
-            w_yield = -1.5  # FLIP YIELD: High yield is now a 'Leaky' signal (Risk)
-            w_mom = -1.0  # ANTI-MOMENTUM: Chasing trends in a crisis is a trap
-            w_vol = 5.0  # TOTAL SAFETY: Gravity pulls only to low-volatility
-            temperature = 0.3
+        if is_stress:
+            # STRESS PHYSICS (IC: 0.1176)
+            # The market trends hard in stress. Yield provides a floor.
+            w_yield = 1.0
+            w_mom = 2.0  # Aggressive Trend Following
+            w_vol = 1.0  # Moderate Risk Aversion
+            temperature = 0.4  # High Conviction
         else:
-            # CALM PHYSICS: Relative Value
-            w_yield = 0.5  # DAMPEN YIELD: Don't let carry bully the model
-            w_mom = 0.5  # MILD TREND: Respect the move, but don't marry it
-            w_vol = 2.0  # RISK AVERSION: Even in calm, favor quality
-            temperature = 0.9
+            # CALM PHYSICS (IC: 0.2071)
+            # The market chases Beta (Volatility) in calm.
+            w_yield = 0.0  # Yield doesn't drive alpha here
+            w_mom = 0.0  # Trend doesn't drive alpha here
+            w_vol = -0.5  # REWARD Volatility (High Beta)
+            temperature = 0.4
 
-        # Normalize via Z-Score
+        # Standard Z-Score Normalization (Optimizer used this)
         def z_score(s):
             return (s - s.mean()) / (s.std() + 1e-6)
 
@@ -204,15 +224,13 @@ class TransitionModel:
                 if i == j:
                     continue
 
-                # The Equation: High Score = Lower Volatility & Lower (Riskier) Yield
-                # This forces capital to flow toward JPY, CHF, and USD during stress.
                 score = (
                     (y_z[j] - y_z[i]) * w_yield
                     + (m_z[j] - m_z[i]) * w_mom
                     - (v_z[j] - v_z[i]) * w_vol
                 )
 
-                weights[i, j] = np.exp(np.clip(score / temperature, -12, 12))
+                weights[i, j] = np.exp(np.clip(score / temperature, -10, 10))
 
         np.fill_diagonal(weights, 1.0)
         T = weights / (weights.sum(axis=1, keepdims=True) + 1e-12)
@@ -221,53 +239,61 @@ class TransitionModel:
     def apply_adaptive_leakage(
         self, T: np.ndarray, currencies: List[str], vix_z: float, indices: Any
     ) -> Tuple[np.ndarray, List[USDLeakageNode], float, RegimeData]:
-        # 1. Leakage Intensity (Floating)
-        # Higher VIX = Higher Leakage to USD
-        # sigmoid = 1 / (1 + np.exp(-(vix_z - 0.5)))
-        leakage_intensity = float(np.clip(0.10 + (vix_z * 0.10), 0.0, 0.50))
-        # Direction Check
+        # 1. Leakage Intensity
+        # Scales with VIX. If VIX Z > 1.5, Leakage -> 60%
+        sigmoid = 1 / (1 + np.exp(-(vix_z - 1.0)))
+        leakage_intensity = float(sigmoid * 0.60)
+
+        # Direction Check (USD Trend)
         d_score = (
             float(indices.direction_score)
             if hasattr(indices, "direction_score")
             else float(indices["direction_score"])
         )
-        if d_score < 0:
-            leakage_intensity = 0.0
+        if d_score < -20:
+            leakage_intensity *= 0.2  # Reduce leakage if USD is weak
 
-        # 2. Apply
         n = len(currencies)
         leakage_nodes = []
         net_flow = 0.0
         T_adj = T.copy()
 
-        for i in range(len(currencies)):
-            T_adj[i, :] = T_adj[i, :] * (1.0 - leakage_intensity)
-            leakage_nodes.append(
-                USDLeakageNode(
-                    iso=currencies[i], leakage_prob=leakage_intensity, is_source=False
+        # Apply Leakage
+        if leakage_intensity > 0.01:
+            for i in range(n):
+                p_leak = leakage_intensity
+                T_adj[i, :] = T_adj[i, :] * (1.0 - p_leak)
+                leakage_nodes.append(
+                    USDLeakageNode(
+                        iso=currencies[i], leakage_prob=p_leak, is_source=False
+                    )
                 )
-            )
-            net_flow += leakage_intensity
+                net_flow += p_leak
 
-        # 3. Labeling
+        # 2. Labeling
         s_score = (
             float(indices.stress_score)
             if hasattr(indices, "stress_score")
             else float(indices["stress_score"])
         )
-
-        label = "Neutral"
-        desc = "Markets are near historical averages."
+        label, desc = "Neutral", "Markets are near historical averages."
 
         if s_score > 60:
-            label = "USD Wrecking Ball" if d_score > 0 else "US-Centric Stress"
-            desc = "High Stress Regime. Yields deprioritized in favor of Safety."
+            if d_score > 0:
+                label = "USD Wrecking Ball"
+                desc = "Systemic Stress + USD Strength. Defensive positioning required."
+            else:
+                label = "US-Centric Stress"
+                desc = "Systemic Stress + USD Weakness. Rotate to CHF/JPY/Gold."
         elif s_score < 40:
-            label = "Tightening / Carry" if d_score > 0 else "Reflation / Risk-On"
-            desc = "Low Stress Regime. Yields and Growth driving capital flows."
+            if d_score < 0:
+                label = "Reflation / Risk-On"
+                desc = "Low Stress + Weak USD. Favor High-Beta and Commodity FX."
+            else:
+                label = "Tightening / Carry"
+                desc = "Low Stress + Strong USD. Favor Yield."
 
-        # Package Result (Safe access)
-        # ... (Same safe packaging logic as before) ...
+        # Package Result
         idx_data = MacroIndices(
             stress_score=s_score,
             direction_score=d_score,
@@ -285,7 +311,7 @@ class TransitionModel:
             else float(indices.get("yield_delta", 0)),
             vix=float(indices.vix)
             if hasattr(indices, "vix")
-            else float(indices.get("vix", 0)),
+            else float(indices.get("vix", 20.0)),
         )
 
         return (

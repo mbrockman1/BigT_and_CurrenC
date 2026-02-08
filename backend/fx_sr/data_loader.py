@@ -92,14 +92,14 @@ class MarketDataLoader:
         yields = pd.DataFrame(index=dates)
         yields["USD"] = usd_yield
 
-        # WIDEN THE SPREADS to create stronger gravity
-        yields["JPY"] = 0.5  # Massive negative carry vs USD
-        yields["CHF"] = 1.0  # Deep negative carry
+        # Structural Spreads (The "Gravity")
+        yields["JPY"] = 0.9
+        yields["CHF"] = 0.7
         yields["EUR"] = usd_yield - 1.5
         yields["GBP"] = usd_yield + 0.2
-        yields["AUD"] = usd_yield + 0.5
-        yields["NZD"] = usd_yield + 1.0  # The Carry King
-        yields["CAD"] = usd_yield - 0.2
+        yields["AUD"] = usd_yield + 0.3
+        yields["NZD"] = usd_yield + 0.6
+        yields["CAD"] = usd_yield - 0.3
 
         # yields["XAU"] = 0.0  # Gold pays no rent
         # yields["SPY"] = 1.5  # Proxy for S&P 500 Dividend Yield
