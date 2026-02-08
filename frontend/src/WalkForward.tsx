@@ -131,8 +131,18 @@ const ModernCapitalTopology = ({
   leakage: any[];
   scores: any[];
 }) => {
-  const currencies = ["EUR", "JPY", "GBP", "AUD", "CAD", "CHF", "NZD"];
-  const radius = 90;
+  const currencies = [
+    "EUR",
+    "JPY",
+    "GBP",
+    "AUD",
+    "CAD",
+    "CHF",
+    "NZD",
+    // "XAU",
+    // "SPY",
+  ];
+  const radius = 85;
   const center = 150;
   const [hoverNode, setHoverNode] = useState<string | null>(null);
 

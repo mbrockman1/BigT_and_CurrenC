@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -165,121 +165,132 @@ class TransitionModel:
         vol: pd.Series,
         yield_diffs: pd.Series,
         beliefs: BeliefParams,
+        vix_z: float = 0.0,
     ) -> np.ndarray:
         currencies = list(self.config.UNIVERSE.keys())
         n = len(currencies)
         weights = np.zeros((n, n), dtype=float)
 
-        # --- SENSITIVITY TUNING ---
-        # Temperature controls how "concentrated" the flows are.
-        # Higher (1.0+) = Spiderweb (lots of rewiring). Lower (0.2) = Winner-Take-All.
-        temperature = 0.8
+        # --- THE 'CENTER OF GRAVITY' FIX ---
+        # We must acknowledge that in the current era, High Yield = High Risk.
 
-        # We Z-Score the inputs so a 1% yield move has the same "Gravity" as a 1% price move.
+        # 1. Define Regime Intensity
+        # If VIX Z is high, we enter 'Preservation Mode'
+        is_stressed = vix_z > 0.5
+
+        if is_stressed:
+            # CRISIS PHYSICS: Capital seeks the 'Deepest Sinks'
+            w_yield = -1.5  # FLIP YIELD: High yield is now a 'Leaky' signal (Risk)
+            w_mom = -1.0  # ANTI-MOMENTUM: Chasing trends in a crisis is a trap
+            w_vol = 5.0  # TOTAL SAFETY: Gravity pulls only to low-volatility
+            temperature = 0.3
+        else:
+            # CALM PHYSICS: Relative Value
+            w_yield = 0.5  # DAMPEN YIELD: Don't let carry bully the model
+            w_mom = 0.5  # MILD TREND: Respect the move, but don't marry it
+            w_vol = 2.0  # RISK AVERSION: Even in calm, favor quality
+            temperature = 0.9
+
+        # Normalize via Z-Score
         def z_score(s):
             return (s - s.mean()) / (s.std() + 1e-6)
 
         y_z = z_score(yield_diffs.reindex(currencies).fillna(0)).to_numpy()
-        m_z = (
-            z_score(mom.reindex(currencies).fillna(0)).to_numpy()
-            * beliefs.trend_sensitivity
-        )
-        v_z = (
-            z_score(vol.reindex(currencies).fillna(0)).to_numpy() * beliefs.vol_penalty
-        )
+        m_z = z_score(mom.reindex(currencies).fillna(0)).to_numpy()
+        v_z = z_score(vol.reindex(currencies).fillna(0)).to_numpy()
 
         for i in range(n):
             for j in range(n):
                 if i == j:
                     continue
 
-                # DIFFERENTIAL PHYSICS: Attraction is based on the RELATIVE advantage of j over i
-                # Capital flows from Low Yield -> High Yield
-                # Capital flows from Low Momentum -> High Momentum
-                # Capital flows from High Vol -> Low Vol
+                # The Equation: High Score = Lower Volatility & Lower (Riskier) Yield
+                # This forces capital to flow toward JPY, CHF, and USD during stress.
+                score = (
+                    (y_z[j] - y_z[i]) * w_yield
+                    + (m_z[j] - m_z[i]) * w_mom
+                    - (v_z[j] - v_z[i]) * w_vol
+                )
 
-                score = (y_z[j] - y_z[i]) + (m_z[j] - m_z[i]) - (v_z[j] - v_z[i])
+                weights[i, j] = np.exp(np.clip(score / temperature, -12, 12))
 
-                weights[i, j] = np.exp(score / temperature)
-
-        # Ensure small baseline connectivity
-        weights = np.clip(weights, 1e-6, None)
-
-        # Self-retention (diagonal)
         np.fill_diagonal(weights, 1.0)
-
-        # Normalize rows to 1.0
-        row_sums = weights.sum(axis=1, keepdims=True)
-        T = weights / (row_sums + 1e-12)
-
+        T = weights / (weights.sum(axis=1, keepdims=True) + 1e-12)
         return T
 
     def apply_adaptive_leakage(
-        self,
-        T: np.ndarray,
-        currencies: List[str],
-        vix_z_score: float,  # <--- NEW: Dynamic Input
-        indices: pd.Series,
+        self, T: np.ndarray, currencies: List[str], vix_z: float, indices: Any
     ) -> Tuple[np.ndarray, List[USDLeakageNode], float, RegimeData]:
-        """
-        Applies USD Leakage based on Adaptive Z-Scores, not magic numbers.
-        """
-        # 1. Calculate Dynamic Leakage Intensity using Sigmoid
-        # Z-Score of 0 (Mean VIX) -> 10% Leakage
-        # Z-Score of +2 (Crisis) -> 40% Leakage
-        # Z-Score of -1 (Calm) -> 0% Leakage
-        sigmoid = 1 / (1 + np.exp(-(vix_z_score - 0.5)))
-        leakage_intensity = float(sigmoid * 0.40)  # Max 40%
+        # 1. Leakage Intensity (Floating)
+        # Higher VIX = Higher Leakage to USD
+        # sigmoid = 1 / (1 + np.exp(-(vix_z - 0.5)))
+        leakage_intensity = float(np.clip(0.10 + (vix_z * 0.10), 0.0, 0.50))
+        # Direction Check
+        d_score = (
+            float(indices.direction_score)
+            if hasattr(indices, "direction_score")
+            else float(indices["direction_score"])
+        )
+        if d_score < 0:
+            leakage_intensity = 0.0
 
-        # Direction filter: Only leak if USD is structurally strong
-        if indices["direction_score"] < 0:
-            leakage_intensity = 0.0  # No leakage if USD is crashing
-
-        # 2. Apply Physics
+        # 2. Apply
         n = len(currencies)
         leakage_nodes = []
         net_flow = 0.0
         T_adj = T.copy()
 
-        if leakage_intensity > 0.01:
-            for i in range(n):
-                p_leak = leakage_intensity
-                T_adj[i, :] = T_adj[i, :] * (1.0 - p_leak)
-                leakage_nodes.append(
-                    USDLeakageNode(
-                        iso=currencies[i], leakage_prob=p_leak, is_source=False
-                    )
+        for i in range(len(currencies)):
+            T_adj[i, :] = T_adj[i, :] * (1.0 - leakage_intensity)
+            leakage_nodes.append(
+                USDLeakageNode(
+                    iso=currencies[i], leakage_prob=leakage_intensity, is_source=False
                 )
-                net_flow += p_leak
+            )
+            net_flow += leakage_intensity
 
-        # 3. Construct Regime Label (Data-Driven)
+        # 3. Labeling
+        s_score = (
+            float(indices.stress_score)
+            if hasattr(indices, "stress_score")
+            else float(indices["stress_score"])
+        )
+
         label = "Neutral"
         desc = "Markets are near historical averages."
 
-        if vix_z_score > 1.0:
-            label = "High Stress"
-            desc = "VIX is > 1 std dev above mean. Capital constraints active."
-            if indices["direction_score"] > 0:
-                label = "USD Wrecking Ball"
-                desc = (
-                    f"Crisis Logic: High Stress (Z={vix_z_score:.1f}) + USD Strength."
-                )
-        elif vix_z_score < -0.5:
-            label = "Reflation / Carry"
-            desc = "Low Volatility Regime. Yield seeking behavior dominant."
+        if s_score > 60:
+            label = "USD Wrecking Ball" if d_score > 0 else "US-Centric Stress"
+            desc = "High Stress Regime. Yields deprioritized in favor of Safety."
+        elif s_score < 40:
+            label = "Tightening / Carry" if d_score > 0 else "Reflation / Risk-On"
+            desc = "Low Stress Regime. Yields and Growth driving capital flows."
 
-        regime_data = RegimeData(
-            label=label,
-            desc=desc,
-            indices=MacroIndices(
-                stress_score=float((vix_z_score + 2) * 20),  # Proxy for UI 0-100
-                direction_score=float(indices["direction_score"]),
-                stress_breadth=0.5,
-                stress_vol=0.5,
-                usd_momentum=0.0,
-                yield_delta=0.0,
-                vix=float(indices["vix"]),
-            ),
+        # Package Result (Safe access)
+        # ... (Same safe packaging logic as before) ...
+        idx_data = MacroIndices(
+            stress_score=s_score,
+            direction_score=d_score,
+            stress_breadth=float(indices.stress_breadth)
+            if hasattr(indices, "stress_breadth")
+            else float(indices.get("stress_breadth", 0)),
+            stress_vol=float(indices.stress_vol)
+            if hasattr(indices, "stress_vol")
+            else float(indices.get("stress_vol", 0)),
+            usd_momentum=float(indices.usd_momentum)
+            if hasattr(indices, "usd_momentum")
+            else float(indices.get("usd_momentum", 0)),
+            yield_delta=float(indices.yield_delta)
+            if hasattr(indices, "yield_delta")
+            else float(indices.get("yield_delta", 0)),
+            vix=float(indices.vix)
+            if hasattr(indices, "vix")
+            else float(indices.get("vix", 0)),
         )
 
-        return T_adj, leakage_nodes, net_flow, regime_data
+        return (
+            T_adj,
+            leakage_nodes,
+            net_flow,
+            RegimeData(label=label, desc=desc, indices=idx_data),
+        )

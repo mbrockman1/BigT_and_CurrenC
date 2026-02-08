@@ -17,47 +17,16 @@ class FXConfig:
         "JPY": {"ticker": "JPY=X", "inverted": True},
         "CHF": {"ticker": "CHF=X", "inverted": True},
         "CAD": {"ticker": "CAD=X", "inverted": True},
+        # "XAU": {"ticker": "GC=F", "inverted": False},  # Gold Futures
+        # "SPY": {"ticker": "SPY", "inverted": False},  # S&P 500 ETF
     }
 
     # Regime variables (context, not nodes)
     REGIME_TICKERS = {
         "VIX": "^VIX",
         "DXY": "DX-Y.NYB",
-    }
-
-    # Yield Proxies (Short-end rates for Carry logic)
-    YIELD_TICKERS = {
-        "USD": "^IRX",  # 13 Week Bill
-        "EUR": "^DE2Y",  # Generic German 2Y proxy (if available)
-    }
-
-    # Horizons in trading days
-    HORIZONS = {
-        "short": 10,
-        "medium": 63,
-        "long": 252,
-    }
-
-    # Safe havens for regime logic
-    SAFE_HAVENS = {"JPY", "CHF"}
-
-
-class FXConfig:
-    # ... (Keep Existing UNIVERSE) ...
-    UNIVERSE = {
-        "EUR": {"ticker": "EURUSD=X", "inverted": False},
-        "GBP": {"ticker": "GBPUSD=X", "inverted": False},
-        "AUD": {"ticker": "AUDUSD=X", "inverted": False},
-        "NZD": {"ticker": "NZDUSD=X", "inverted": False},
-        "JPY": {"ticker": "JPY=X", "inverted": True},
-        "CHF": {"ticker": "CHF=X", "inverted": True},
-        "CAD": {"ticker": "CAD=X", "inverted": True},
-    }
-
-    # ... (Keep Existing REGIME_TICKERS) ...
-    REGIME_TICKERS = {
-        "VIX": "^VIX",
-        "DXY": "DX-Y.NYB",
+        "XAU": "GC=F",
+        "SPY": "SPY",
     }
 
     # NEW: Yield Proxies (2Y or similar short-end rates)
@@ -73,10 +42,12 @@ class FXConfig:
         "NZD": "0P0000XW84.NZ",  # New Zealand 10Y (Auckland)
     }
 
+    # Horizons in trading days
     HORIZONS = {
         "short": 10,
         "medium": 63,
         "long": 252,
     }
 
+    # Safe havens for regime logic
     SAFE_HAVENS = {"JPY", "CHF", "USD"}

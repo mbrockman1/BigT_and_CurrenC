@@ -9,12 +9,24 @@ class MarketDataLoader:
     def __init__(self, config: FXConfig):
         self.config = config
 
-    def fetch_history(self, lookback_days: int = 500) -> pd.DataFrame:
+    def fetch_history(self, lookback_days: int = 750) -> pd.DataFrame:
+        """
+        Fetches EOD FX rates, Regime variables, and the Global Yield Anchor (^TNX).
+        """
+        # 1. Collect all required tickers
         all_tickers = [meta["ticker"] for meta in self.config.UNIVERSE.values()]
         all_tickers += list(self.config.REGIME_TICKERS.values())
 
-        print(f"Fetching {len(all_tickers)} tickers from Yahoo Finance...")
-        # auto_adjust=True avoids most 'NoneType' price issues
+        # Add the Global Yield Anchor (US 10-Year Treasury)
+        yield_anchor = "^TNX"
+        if yield_anchor not in all_tickers:
+            all_tickers.append(yield_anchor)
+
+        print(
+            f"Fetching {len(all_tickers)} tickers {[_ for _ in all_tickers]} from Yahoo Finance..."
+        )
+
+        # Download data
         raw = yf.download(
             all_tickers,
             period=f"{lookback_days}d",
@@ -28,55 +40,68 @@ class MarketDataLoader:
 
         df = pd.DataFrame(index=raw.index)
 
-        # 1. Process Currencies
+        # 2. Process Currencies (Normalize to 'Value in USD')
         for iso, meta in self.config.UNIVERSE.items():
             ticker = meta["ticker"]
             if ticker in raw.columns:
-                series = raw[ticker]
-                # INSTEAD OF DROPNA: Forward fill missing data points (like the CHF timeout)
-                # then backfill any early-history gaps
-                series = series.ffill().bfill()
+                # Forward fill gaps (like timeouts or holidays) to prevent NaN crashes
+                series = raw[ticker].ffill().bfill()
                 df[iso] = (1.0 / series) if meta["inverted"] else series
             else:
-                print(f"Warning: {iso} ({ticker}) missing from download.")
+                print(f"Warning: {iso} missing from download.")
 
-        # 2. Process Regime Vars
+        # 3. Process Regime Variables (VIX, DXY)
         for key, ticker in self.config.REGIME_TICKERS.items():
             if ticker in raw.columns:
                 df[key] = raw[ticker].ffill().bfill()
 
-        # 3. Handle Yields (RiskFree)
-        usd_yield_ticker = self.config.YIELD_TICKERS["USD"]
-        if usd_yield_ticker in raw.columns:
-            df["RiskFree"] = raw[usd_yield_ticker].ffill().bfill()
+        # 4. Handle Global Yield Anchor (RiskFree / Gravity Base)
+        if yield_anchor in raw.columns:
+            df["RiskFree"] = raw[yield_anchor].ffill().bfill()
         else:
-            # Synthetic fallback if yield download fails
-            df["RiskFree"] = 4.5
+            # Hard fallback if download fails (approximate 10Y yield)
+            df["RiskFree"] = 4.2
 
-        # Drop only if the entire row is empty
+        # Final cleanup
         df = df.dropna(how="all").sort_index()
 
         if df.empty:
-            raise ValueError(
-                "Data download resulted in an empty DataFrame. Check internet connection."
-            )
+            raise ValueError("Download resulted in empty DataFrame. Check connection.")
 
         return df
 
     def fetch_yields(self, dates: pd.DatetimeIndex) -> pd.DataFrame:
-        # Simple synthetic map to ensure logic works even if bond data times out
-        yields = pd.DataFrame(index=dates)
-        base = 4.5  # Fallback
-        if "RiskFree" in self.config.YIELD_TICKERS:
-            # Logic to fetch or use pre-downloaded RiskFree
-            pass
+        """
+        Constructs a dynamic Incentive Map.
+        """
+        try:
+            usd_yield = yf.download(
+                "^TNX",
+                start=dates[0],
+                end=dates[-1],
+                progress=False,
+                auto_adjust=False,
+            )["Close"]
+            # FIX: Ensure it is a percentage (e.g. 4.2 not 42.0 or 0.042)
+            if usd_yield.mean() > 20:
+                usd_yield /= 10.0
+            usd_yield = usd_yield.reindex(dates).ffill().bfill()
+        except:
+            usd_yield = pd.Series(4.2, index=dates)
 
-        yields["USD"] = 4.5
-        yields["JPY"] = 0.1
-        yields["CHF"] = 1.5
-        yields["EUR"] = 3.0
-        yields["GBP"] = 5.0
-        yields["AUD"] = 4.3
-        yields["NZD"] = 5.5
-        yields["CAD"] = 4.5
+        yields = pd.DataFrame(index=dates)
+        yields["USD"] = usd_yield
+
+        # WIDEN THE SPREADS to create stronger gravity
+        yields["JPY"] = 0.5  # Massive negative carry vs USD
+        yields["CHF"] = 1.0  # Deep negative carry
+        yields["EUR"] = usd_yield - 1.5
+        yields["GBP"] = usd_yield + 0.2
+        yields["AUD"] = usd_yield + 0.5
+        yields["NZD"] = usd_yield + 1.0  # The Carry King
+        yields["CAD"] = usd_yield - 0.2
+
+        # yields["XAU"] = 0.0  # Gold pays no rent
+        # yields["SPY"] = 1.5  # Proxy for S&P 500 Dividend Yield
+
         return yields

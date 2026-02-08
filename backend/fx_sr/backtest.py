@@ -84,9 +84,11 @@ class WalkForwardEngine:
         d = float(indices["direction_score"])
         risk_s = max(0, 100 - (abs(s - 40) * 5))
         risk_d = max(0, 100 - (abs(d - 0) * 2))
-        if (s < 40 and delta.stress_chg > 0) or (s > 40 and delta.stress_chg < 0):
+        if (s < 40 and delta.stress_delta > 0) or (s > 40 and delta.stress_delta < 0):
             risk_s *= 1.2
-        if (d < 0 and delta.direction_chg > 0) or (d > 0 and delta.direction_chg < 0):
+        if (d < 0 and delta.direction_delta > 0) or (
+            d > 0 and delta.direction_delta < 0
+        ):
             risk_d *= 1.2
         total_risk = float(min(99.0, max(risk_s, risk_d)))
 
@@ -215,7 +217,7 @@ class WalkForwardEngine:
                     )
 
                     T_base = self.physics.construct_physics_matrix(
-                        mom, vol, y_diff, BeliefParams()
+                        mom, vol, y_diff, BeliefParams(), vix_z
                     )
                     T_adj, leakage, net_flow, regime = (
                         self.physics.apply_adaptive_leakage(
@@ -278,8 +280,10 @@ class WalkForwardEngine:
                         else 0.0
                     )
                     delta_obj = WeeklyDelta(
-                        stress_chg=float(indices_rec["stress_score"] - prev_stress),
-                        direction_chg=float(indices_rec["direction_score"] - prev_dir),
+                        stress_delta=float(indices_rec["stress_score"] - prev_stress),
+                        direction_delta=float(
+                            indices_rec["direction_score"] - prev_dir
+                        ),
                         regime_shift=(regime.label != prev_label),
                         prev_label=prev_label,
                     )
