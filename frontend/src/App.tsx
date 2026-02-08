@@ -195,6 +195,7 @@ interface SimulationOutput {
   mode: string;
   horizons: Record<string, HorizonResult[]>;
   posture: InstitutionalPosture; // Simulator uses this now
+  transition: RegimeTransition;
 }
 interface BeliefParams {
   risk_mix: number;
@@ -650,11 +651,20 @@ export default function App() {
     Math.abs(volPen - 1.0) > 0.01;
 
   const useSim = isCounterfactual && simData;
+  // NEW: Logic to switch between Real Advice and Simulated Advice
+  const currentPosture = useSim ? simData.posture : baseData?.posture;
   const currentList = useSim
     ? simData.horizons[horizon]
-    : baseData.horizons[horizon];
-  // NEW: Logic to switch between Real Advice and Simulated Advice
-  const currentPosture = useSim ? simData.posture : baseData.posture;
+    : baseData?.horizons[horizon];
+  const currentTransition = useSim ? simData.transition : baseData?.transition;
+
+  // Use simulated regime label if active, otherwise real label
+  const displayRegimeLabel = useSim
+    ? simData.posture.headline
+    : baseData.regime.label;
+  const displayRegimeDesc = useSim
+    ? "Counterfactual Scenario Active"
+    : baseData.regime.desc;
 
   const currentConfidence = baseData.confidence;
   const currentRegime = useSim
@@ -753,12 +763,8 @@ export default function App() {
                       />
                     </>
                   }
-                  value={useSim ? "Simulation" : currentRegime.label}
-                  subtext={
-                    useSim
-                      ? "Viewing counterfactual scenario"
-                      : currentRegime.desc
-                  }
+                  value={displayRegimeLabel}
+                  subtext={displayRegimeDesc}
                   icon={ShieldAlert}
                   colorClass={
                     baseData.regime.indices.stress_score > 40
@@ -838,7 +844,7 @@ export default function App() {
                         : baseData.diff
                     }
                   />
-                  <TransitionRadar transition={baseData.transition} />
+                  <TransitionRadar transition={currentTransition} />
                 </div>
                 <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
                   <div className="flex justify-between items-center mb-6">

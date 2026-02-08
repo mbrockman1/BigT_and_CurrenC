@@ -141,6 +141,7 @@ class SimulationOutput(BaseModel):
     params_used: BeliefParams
     horizons: Dict[str, List[HorizonResult]]
     posture: InstitutionalPosture
+    transition: RegimeTransition
 
 
 # Rolling History (/history)

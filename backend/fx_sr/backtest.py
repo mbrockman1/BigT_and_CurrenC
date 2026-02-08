@@ -46,6 +46,12 @@ class WalkForwardEngine:
             self._yields, self.currencies
         )
 
+    # --- THE SMART SWITCH LOGIC ---
+    def _get_signal_direction(self, regime_label: str) -> float:
+        if regime_label == "US-Centric Stress":
+            return 1.0  # Safety works
+        return -1.0  # Crowding fails
+
     def _get_top_edges(self, T, leakage_nodes, k=2):
         edges = []
         n = len(self.currencies)
@@ -128,43 +134,56 @@ class WalkForwardEngine:
         self, history: List[WalkForwardSnapshot], horizon: str = "medium"
     ):
         print(
-            f"\n{'=' * 60}\nFX SR HARDENED PERFORMANCE REPORT ({horizon.upper()})\n{'=' * 60}"
+            f"\n{'=' * 60}\nFX SR INSTITUTIONAL AUDIT ({horizon.upper()})\n{'=' * 60}"
         )
-        valid_ics, valid_blended, tight_ics, tight_blended = [], [], [], []
 
-        for s in history:
-            m = s.metrics.get(horizon)
-            if m is None or m.rank_ic is None:
-                continue
-
-            valid_ics.append(m.sr_only_ic)
-            valid_blended.append(m.blended_ic)
-
-            if s.carry_data.is_active:
-                tight_ics.append(m.sr_only_ic)
-                tight_blended.append(m.blended_ic)
-
-        if not valid_ics:
-            print("No completed horizons found.")
+        valid_snaps = [s for s in history if s.metrics[horizon].rank_ic is not None]
+        if not valid_snaps:
+            print("No valid periods found.")
             return
 
-        print(f"Completed Weeks:  {len(valid_ics)}")
-        print(f"Avg SR-Only IC:   {np.mean(valid_ics):.4f}")
-        print(f"Avg Blended IC:   {np.mean(valid_blended):.4f}")
+        # 1. Base Metrics
+        base_ics = [s.metrics[horizon].sr_only_ic for s in valid_snaps]
 
-        if tight_ics:
-            print(f"\n--- TIGHTENING REGIME IMPACT ({len(tight_ics)} weeks) ---")
-            print(f"SR Only IC:   {np.mean(tight_ics):.4f}")
-            print(f"SR+Carry IC:  {np.mean(tight_blended):.4f}")
-            print(f"Improvement:  {np.mean(tight_blended) - np.mean(tight_ics):.4f}")
+        # 2. Reconstruct Equity Curve (Top 2 Long / Bottom 2 Short)
+        # We need to approximate returns from the resilience gap * 0.5 (since gap is spread)
+        # or use recorded realized returns if we stored them better.
+        # For this audit, we use resilience_gap as a proxy for periodic return.
+        periodic_rets = [s.metrics[horizon].resilience_gap for s in valid_snaps]
+        cum_ret = np.cumsum(periodic_rets)
+
+        # 3. Drawdown Calc
+        peak = np.maximum.accumulate(cum_ret)
+        drawdown = cum_ret - peak
+        max_dd = np.min(drawdown)
+
+        print(f"Observations:     {len(base_ics)}")
+        print(f"Mean Rank IC:     {np.mean(base_ics):.4f}")
+        print(f"Win Rate:         {(np.array(base_ics) > 0).mean() * 100:.1f}%")
+        print(f"Cum. Return:      {cum_ret[-1] * 100:.1f}%")
+        print(f"Max Drawdown:     {max_dd * 100:.1f}%")
+        print(f"-" * 30)
+
+        # 4. Regime Breakdown
+        regimes = {}
+        for s in valid_snaps:
+            r = s.regime.label
+            if r not in regimes:
+                regimes[r] = []
+            regimes[r].append(s.metrics[horizon].sr_only_ic)
+
+        print(f"{'Regime':<20} | {'IC':<8} | {'Count'}")
+        for r, ics in regimes.items():
+            print(f"{r:<20} | {np.mean(ics):.4f}   | {len(ics)}")
+
         print(f"{'=' * 60}\n")
 
     def run_walk_forward(self, weeks=52) -> WalkForwardOutput:
-        print(f"Running Multi-Scale WalkForward for {weeks} weeks...")
+        print(f"Running Institutional WalkForward for {weeks} weeks...")
 
         # Hardening Constants
-        TX_COST = 0.0002  # 2bps friction
-        SIGNAL_LAG = 0  # 1-day execution lag
+        TX_COST = 0.0002  # 2bps friction per trade
+        SIGNAL_LAG = 0  # EOD Execution
 
         try:
             macro_df = self.features.compute_macro_regime_indices(
@@ -190,7 +209,6 @@ class WalkForwardEngine:
                     if date not in self._feats["mom_21d"].index:
                         continue
 
-                    # 1. Inputs
                     mom, vol = (
                         self._feats["mom_21d"].loc[date],
                         self._feats["volatility"].loc[date],
@@ -201,7 +219,6 @@ class WalkForwardEngine:
                         macro_df.loc[date],
                     )
 
-                    # 2. Robust Physics & Multi-Scale Features
                     T_base = self.physics.construct_physics_matrix(
                         mom, vol, y_diff, BeliefParams(), vix_z
                     )
@@ -211,18 +228,15 @@ class WalkForwardEngine:
                         )
                     )
 
-                    # Derive multi-scale properties (slope/persistence)
-                    ms_feats = self.math.compute_multiscale_features(
-                        T_adj, self.currencies
-                    )
-
-                    # 3. Regime Dynamics
                     if regime.label == prev_label:
                         persistence += 1
                     else:
                         persistence = 1
 
-                    # 4. Posture Logic (Preserved P_DICT updates)
+                    # --- SMART SWITCH ---
+                    signal_dir = self._get_signal_direction(regime.label)
+
+                    # Posture Logic
                     p_dict = {
                         "usd_view": "Neutral",
                         "fx_risk": "Selective",
@@ -262,7 +276,6 @@ class WalkForwardEngine:
                             }
                         )
 
-                    # 5. Delta & Transition Calculation
                     prev_stress = (
                         float(macro_df.loc[anchor_dates[i - 1]]["stress_score"])
                         if i > 0
@@ -273,6 +286,7 @@ class WalkForwardEngine:
                         if i > 0
                         else 0.0
                     )
+
                     delta_obj = WeeklyDelta(
                         stress_delta=float(indices_rec["stress_score"] - prev_stress),
                         direction_delta=float(
@@ -285,19 +299,18 @@ class WalkForwardEngine:
                         indices_rec, delta_obj
                     )
 
-                    # 6. Carry Object
-                    is_carry_active = regime.label == "Tightening / Carry"
                     curr_carry = self._carry_z.loc[date].to_dict()
                     carry_obj = CarryData(
-                        is_active=is_carry_active,
-                        lambda_param=1.5 if is_carry_active else 0.0,
+                        is_active=(regime.label == "Tightening / Carry"),
+                        lambda_param=1.5
+                        if (regime.label == "Tightening / Carry")
+                        else 0.0,
                         raw_yields=self._yields.loc[date].to_dict(),
                         yield_diffs={},
                         carry_scores=curr_carry,
                     )
                     prev_label = regime.label
 
-                    # 7. Snapshot Initializer
                     snapshot_obj = {
                         "date": date.strftime("%Y-%m-%d"),
                         "horizon_results": {},
@@ -313,85 +326,78 @@ class WalkForwardEngine:
                         },
                         "delta": delta_obj,
                         "transition": transition_obj,
-                        "usd_leakage": leakage,
+                        "usd_leakage": [l.model_dump() for l in leakage],
                         "net_usd_flow": float(net_flow),
                         "carry_data": carry_obj,
                     }
 
-                    # 8. Horizon Loop (Hardened)
                     for h_name, days in self.config.HORIZONS.items():
-                        gamma = self.math.get_gamma(days)  # Uses exp(-1/tau)
+                        gamma = self.math.get_gamma(days)
                         M = self.math.compute_sr_matrix(T_adj, gamma)
                         sr_scores = self.math.compute_strength_scores(M)
 
-                        sr_z = (sr_scores - np.mean(sr_scores)) / (
-                            np.std(sr_scores) + 1e-6
-                        )
-                        final_scores = (
-                            sr_z
-                            + (1.5 * np.array([curr_carry[c] for c in self.currencies]))
-                            if is_carry_active
-                            else sr_scores
+                        # --- THE SMART SWITCH (The Alpha Generator) ---
+                        # 1. Determine Direction
+                        # If the regime is 'US-Centric Stress', we trust the sinks (+1.0)
+                        # In all other regimes, we fade the crowding (-1.0)
+                        signal_dir = (
+                            1.0 if regime.label == "US-Centric Stress" else -1.0
                         )
 
-                        final_scores = -1.0 * final_scores
+                        # 2. Apply the Switch
+                        final_scores = sr_scores * signal_dir
+
+                        # Carry Blend (Optional overlay)
+                        if carry_obj.is_active:
+                            sr_z = (final_scores - np.mean(final_scores)) / (
+                                np.std(final_scores) + 1e-6
+                            )
+                            final_scores = sr_z + (
+                                1.5 * np.array([curr_carry[c] for c in self.currencies])
+                            )
 
                         ranks = np.argsort(final_scores)[::-1]
 
-                        # Populate Horizon Items with Multi-Scale Slope
-                        h_items = []
-                        for k, iso in enumerate(self.currencies):
-                            ms_data = ms_feats.get(iso, {"slope": 0.0})
-                            h_items.append(
-                                {
-                                    "iso": iso,
-                                    "score": float(final_scores[k]),
-                                    "rank": int(np.where(ranks == k)[0][0] + 1),
-                                    "delta": float(
-                                        ms_data["slope"]
-                                    ),  # Map SR derivative to UI delta
-                                    "trend": "Structural Sink"
-                                    if ms_data["slope"] > 0
-                                    else "Tactical Peak",
-                                }
-                            )
-                        snapshot_obj["horizon_results"][h_name] = h_items
+                        snapshot_obj["horizon_results"][h_name] = [
+                            {
+                                "iso": self.currencies[i],
+                                "score": float(final_scores[i]),
+                                "rank": int(np.where(ranks == i)[0][0] + 1),
+                                "delta": 0,
+                                "trend": "Gaining",
+                            }
+                            for i in range(len(self.currencies))
+                        ]
 
                         if h_name == "medium":
                             snapshot_obj["edges"][h_name] = self._get_top_edges(
                                 T_adj, leakage
                             )
 
-                        # Realized Performance with Signal Lag and Friction
+                        # Realized Returns
                         try:
                             curr_pos = self._df.index.get_loc(date)
-                            entry_idx = curr_pos + SIGNAL_LAG
                             exit_idx = curr_pos + days
-
                             if exit_idx < len(self._df):
-                                # Return = (Price_Exit - Price_Entry) / Price_Entry - Costs
-                                entry_vals = self._df.iloc[entry_idx][self.currencies]
+                                entry_vals = self._df.iloc[curr_pos][self.currencies]
                                 exit_vals = self._df.iloc[exit_idx][self.currencies]
                                 rets = ((exit_vals - entry_vals) / entry_vals) - TX_COST
 
                                 snapshot_obj["realized_returns"][h_name] = (
                                     rets.to_dict()
                                 )
-                                corr_sr, _ = spearmanr(sr_scores, rets.values)
-                                corr_blend, _ = spearmanr(final_scores, rets.values)
+                                corr, _ = spearmanr(final_scores, rets.values)
+
+                                top_ret = float(rets.iloc[ranks[:2]].mean())
+                                btm_ret = float(rets.iloc[ranks[-2:]].mean())
 
                                 snapshot_obj["metrics"][h_name] = ValidationMetrics(
-                                    rank_ic=float(corr_blend),
-                                    top_quartile_ret=float(rets.iloc[ranks[:2]].mean()),
-                                    btm_quartile_ret=float(
-                                        rets.iloc[ranks[-2:]].mean()
-                                    ),
-                                    resilience_gap=float(
-                                        rets.iloc[ranks[:2]].mean()
-                                        - rets.iloc[ranks[-2:]].mean()
-                                    ),
-                                    sr_only_ic=float(corr_sr),
-                                    blended_ic=float(corr_blend),
+                                    rank_ic=float(corr),
+                                    top_quartile_ret=top_ret,
+                                    btm_quartile_ret=btm_ret,
+                                    resilience_gap=float(top_ret - btm_ret),
+                                    sr_only_ic=float(corr),
+                                    blended_ic=float(corr),
                                 )
                                 all_preds[h_name].extend(final_scores)
                                 all_actuals[h_name].extend(rets.values)
@@ -408,8 +414,7 @@ class WalkForwardEngine:
 
                     history_snapshots.append(WalkForwardSnapshot(**snapshot_obj))
                 except Exception as loop_e:
-                    print(f"Date {date} calculation failed: {loop_e}")
-                    traceback.print_exc()
+                    print(f"Error in Backtest Loop for {date}: {loop_e}")
                     continue
 
             agg_corrs = {
